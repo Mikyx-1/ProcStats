@@ -25,14 +25,14 @@ except ImportError:
 
 def monitor_gpu_usage(gpu_index=0, pid=None):
     if not PYNVML_AVAILABLE:
-        return {"gpu_utilization_percent": None, "vram_usage_mb": None}
+        return {"gpu_utilisation_percent": None, "vram_usage_mb": None}
 
     try:
         nvmlInit()
         device_count = nvmlDeviceGetCount()
         if gpu_index >= device_count:
             nvmlShutdown()
-            return {"gpu_utilization_percent": None, "vram_usage_mb": None}
+            return {"gpu_utilisation_percent": None, "vram_usage_mb": None}
 
         handle = nvmlDeviceGetHandleByIndex(gpu_index)
         if pid is None:
@@ -57,19 +57,19 @@ def monitor_gpu_usage(gpu_index=0, pid=None):
                     gpu_util = p.smUtil
                     break
         except NVMLError_NotSupported:
-            print("Per-process GPU utilization not supported.")
+            print("Per-process GPU utilisation not supported.")
         except NVMLError:
             pass
 
         nvmlShutdown()
         return {
-            "gpu_utilization_percent": gpu_util,
+            "gpu_utilisation_percent": gpu_util,
             "vram_usage_mb": vram_usage,
         }
 
     except Exception as e:
         print(f"GPU monitoring failed: {e}")
-        return {"gpu_utilization_percent": None, "vram_usage_mb": None}
+        return {"gpu_utilisation_percent": None, "vram_usage_mb": None}
 
 
 class Benchmark:
@@ -82,7 +82,8 @@ class Benchmark:
         proc = psutil.Process(pid)
         cpu_usages = []
         ram_usages = []
-
+        gpu_utils = []
+        vram_usages = []
         proc.cpu_percent(interval=None)
 
         while not stop_event.is_set():
@@ -90,6 +91,12 @@ class Benchmark:
                 try:
                     cpu_usages.append(proc.cpu_percent(interval=None))
                     ram_usages.append(proc.memory_info().rss)
+                    if self.use_gpu:
+                        gpu_resource_usg = monitor_gpu_usage(
+                            gpu_index=self.gpu_index, pid=pid
+                        )
+                        gpu_utils.append(gpu_resource_usg["gpu_utilisation_percent"])
+                        vram_usages.append(gpu_resource_usg["vram_usage_mb"])
                 except psutil.NoSuchProcess:
                     break
             time.sleep(self.interval)
@@ -100,6 +107,14 @@ class Benchmark:
         stats["ram_avg"] = (
             sum(ram_usages) / len(ram_usages) / 1024**2 if ram_usages else 0
         )
+        stats["gpu_utilisation_avg"] = (
+            sum(gpu_utils) / len(gpu_utils) if gpu_utils else 0
+        )
+        stats["gpu_utilisation_max"] = max(gpu_utils, default=0)
+        stats["vram_usage_avg"] = (
+            sum(vram_usages) / len(vram_usages) if vram_usages else 0
+        )
+        stats["vram_usage_max"] = max(vram_usages, default=0)
 
     def __call__(self, func):
         @functools.wraps(func)
@@ -110,8 +125,8 @@ class Benchmark:
 
                 if self.use_gpu:
                     gpu_stats = monitor_gpu_usage(gpu_index=self.gpu_index)
-                    stats_dict["gpu_utilization_percent"] = gpu_stats[
-                        "gpu_utilization_percent"
+                    stats_dict["gpu_utilisation_percent"] = gpu_stats[
+                        "gpu_utilisation_percent"
                     ]
                     stats_dict["vram_usage_mb"] = gpu_stats["vram_usage_mb"]
 
@@ -146,7 +161,7 @@ class Benchmark:
 
             if self.use_gpu:
                 print(
-                    f"[{func.__name__}] GPU utilization: {stats.get('gpu_utilization_percent', 0)}%"
+                    f"[{func.__name__}] GPU utilisation: {stats.get('gpu_utilisation_percent', 0)}%"
                 )
                 print(
                     f"[{func.__name__}] VRAM usage: {stats.get('vram_usage_mb', 0):.2f} MB"
@@ -164,8 +179,10 @@ def heavy_gpu_task():
 
     print("Inside task PID:", os.getpid())
     a = torch.randn(10000, 10000, device="cuda:1")
-    b = torch.matmul(a, a.T)
-    time.sleep(5)
+    for _ in range(10):
+        b = torch.matmul(a, a.T)
+        time.sleep(1)
+    # time.sleep(5)
 
 
 heavy_gpu_task()
