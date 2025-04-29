@@ -1,7 +1,6 @@
 import os
 import time
 import psutil
-import functools
 import multiprocessing as mp
 import numpy as np
 from typing import Union
@@ -42,68 +41,54 @@ class MonitorGPU:
                 f"GPU index {gpu_index} is out of range (found {device_count} devices)."
             )
 
-        self.handle = nvmlDeviceGetHandleByIndex(gpu_index)
+        nvmlShutdown()  # Re-initialise inside subprocess later
 
-    def _sample_gpu_utilisation(self, pid):
-        try:
-            proc_utils = nvmlDeviceGetProcessUtilization(self.handle, 1000)
-            for p in proc_utils:
-                if p.pid == pid:
-                    return p.smUtil
-        except NVMLError_NotSupported:
-            print("Per-process GPU utilisation not supported.")
-        except NVMLError:
-            pass
-        return 0
+    @staticmethod
+    def monitor_until_static(gpu_index, pid, interval, result_container):
+        from pynvml import (
+            nvmlInit,
+            nvmlShutdown,
+            nvmlDeviceGetHandleByIndex,
+            nvmlDeviceGetComputeRunningProcesses,
+            nvmlDeviceGetProcessUtilization,
+            NVMLError,
+            NVMLError_NotSupported,
+        )
+        import psutil
 
-    def _sample_gpu_vram(self, pid):
-        try:
-            processes = nvmlDeviceGetComputeRunningProcesses(self.handle)
-            for p in processes:
-                if p.pid == pid:
-                    return p.usedGpuMemory / 1024**2  # MB
-        except NVMLError:
-            pass
-        return 0
+        def sample_gpu_utilisation(handle, pid):
+            try:
+                proc_utils = nvmlDeviceGetProcessUtilization(handle, 1000)
+                for p in proc_utils:
+                    if p.pid == pid:
+                        return p.smUtil
+            except NVMLError_NotSupported:
+                print("Per-process GPU utilisation not supported.")
+            except NVMLError:
+                pass
+            return 0
 
-    def _monitor(self, pid):
+        def sample_gpu_vram(handle, pid):
+            try:
+                processes = nvmlDeviceGetComputeRunningProcesses(handle)
+                for p in processes:
+                    if p.pid == pid:
+                        return p.usedGpuMemory / 1024**2  # MB
+            except NVMLError:
+                pass
+            return 0
+
+        nvmlInit()
+        handle = nvmlDeviceGetHandleByIndex(gpu_index)
+
         gpu_utils = []
         vram_usages = []
 
         try:
-            proc = psutil.Process(pid)
-            while proc.is_running():
-                gpu_utils.append(self._sample_gpu_utilisation(pid))
-                vram_usages.append(self._sample_gpu_vram(pid))
-                time.sleep(self.interval)
-        except psutil.NoSuchProcess:
-            pass
-        finally:
-            nvmlShutdown()
-            gpu_util_mean = sum(gpu_utils) / len(gpu_utils) if gpu_utils else 0
-            gpu_util_max = max(gpu_utils, default=0)
-
-            vram_usage_mean = sum(vram_usages) / len(vram_usages) if vram_usages else 0
-            vram_usage_max = max(vram_usages, default=0)
-
-            return {
-                "gpu_util_mean": gpu_util_mean,
-                "gpu_util_max": gpu_util_max,
-                "vram_usage_mean": vram_usage_mean,
-                "vram_usage_max": vram_usage_max,
-            }
-
-    def monitor_until(self, pid, stop_event, result_container):
-        gpu_utils = []
-        vram_usages = []
-        try:
-            while not stop_event.is_set():
-                sampled_gpu_util = self._sample_gpu_utilisation(pid)
-                sampled_vram = self._sample_gpu_vram(pid)
-                # print(f"GPU util: {sampled_gpu_util}, VRAM: {sampled_vram}")
-                gpu_utils.append(sampled_gpu_util)
-                vram_usages.append(sampled_vram)
-                time.sleep(self.interval)
+            while psutil.pid_exists(pid) and psutil.Process(pid).is_running():
+                gpu_utils.append(sample_gpu_utilisation(handle, pid))
+                vram_usages.append(sample_gpu_vram(handle, pid))
+                time.sleep(interval)
         finally:
             nvmlShutdown()
             result_container.append(
@@ -119,38 +104,52 @@ class MonitorGPU:
                 }
             )
 
+    def monitor(self, target, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        mp.set_start_method("spawn", force=True)
+        manager = mp.Manager()
+        result_container = manager.list()
+
+        # Launch target process
+        process = mp.Process(target=target, args=args, kwargs=kwargs)
+        process.start()
+
+        # Launch monitor process
+        monitor_proc = mp.Process(
+            target=MonitorGPU.monitor_until_static,
+            args=(self.gpu_index, process.pid, self.interval, result_container),
+        )
+        monitor_proc.start()
+
+        # Wait for both
+        process.join()
+        monitor_proc.join()
+
+        return (
+            result_container[0]
+            if result_container
+            else {
+                "gpu_util_mean": 0,
+                "gpu_util_max": 0,
+                "vram_usage_mean": 0,
+                "vram_usage_max": 0,
+            }
+        )
+
 
 def heavy_cpu_gpu_task():
     import torch
-    import time
     import os
 
     print("Inside PID:", os.getpid())
     a = torch.randn(5000, 5000, device="cuda:1")
-    for _ in range(5):
+    for _ in range(1000):
         b = torch.matmul(a, a.T)
-        time.sleep(3)
 
 
 if __name__ == "__main__":
-    import threading
-
-    mp.set_start_method("spawn", force=True)
-    p = mp.Process(target=heavy_cpu_gpu_task)
-    p.start()
-
-    gpu_monitor = MonitorGPU(gpu_index=1, interval=0.01)
-    stop_event = threading.Event()
-    results = []
-
-    monitor_thread = threading.Thread(
-        target=gpu_monitor.monitor_until, args=(p.pid, stop_event, results)
-    )
-
-    monitor_thread.start()
-
-    p.join()
-    stop_event.set()
-    monitor_thread.join()
-
-    print("GPU Usage Stats:", results[0] if results else "No data")
+    monitor_gpu = MonitorGPU(gpu_index=1, interval=0.0001)
+    res = monitor_gpu.monitor(heavy_cpu_gpu_task)
+    print(f"res: {res}")
