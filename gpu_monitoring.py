@@ -93,8 +93,64 @@ class MonitorGPU:
                 "vram_usage_max": vram_usage_max,
             }
 
+    def monitor_until(self, pid, stop_event, result_container):
+        gpu_utils = []
+        vram_usages = []
+        try:
+            while not stop_event.is_set():
+                sampled_gpu_util = self._sample_gpu_utilisation(pid)
+                sampled_vram = self._sample_gpu_vram(pid)
+                # print(f"GPU util: {sampled_gpu_util}, VRAM: {sampled_vram}")
+                gpu_utils.append(sampled_gpu_util)
+                vram_usages.append(sampled_vram)
+                time.sleep(self.interval)
+        finally:
+            nvmlShutdown()
+            result_container.append(
+                {
+                    "gpu_util_mean": (
+                        sum(gpu_utils) / len(gpu_utils) if gpu_utils else 0
+                    ),
+                    "gpu_util_max": max(gpu_utils, default=0),
+                    "vram_usage_mean": (
+                        sum(vram_usages) / len(vram_usages) if vram_usages else 0
+                    ),
+                    "vram_usage_max": max(vram_usages, default=0),
+                }
+            )
+
+
+def heavy_cpu_gpu_task():
+    import torch
+    import time
+    import os
+
+    print("Inside PID:", os.getpid())
+    a = torch.randn(5000, 5000, device="cuda:1")
+    for _ in range(5):
+        b = torch.matmul(a, a.T)
+        time.sleep(3)
+
 
 if __name__ == "__main__":
-    gpu_resource_sampler = MonitorGPU(gpu_index=1, interval=0.001)
-    res = gpu_resource_sampler._monitor(pid=221628)
-    print(res)
+    import threading
+
+    mp.set_start_method("spawn", force=True)
+    p = mp.Process(target=heavy_cpu_gpu_task)
+    p.start()
+
+    gpu_monitor = MonitorGPU(gpu_index=1, interval=0.01)
+    stop_event = threading.Event()
+    results = []
+
+    monitor_thread = threading.Thread(
+        target=gpu_monitor.monitor_until, args=(p.pid, stop_event, results)
+    )
+
+    monitor_thread.start()
+
+    p.join()
+    stop_event.set()
+    monitor_thread.join()
+
+    print("GPU Usage Stats:", results[0] if results else "No data")
