@@ -1,6 +1,7 @@
 import multiprocessing as mp
 import os
 import time
+from typing import Callable
 
 from cpu_ram_monitoring import MonitorCPUAndRAM
 from gpu_monitoring import MonitorGPU
@@ -12,65 +13,55 @@ class FullSystemMonitor:
         self.gpu_index = gpu_index
         self.use_gpu = use_gpu
 
-    def _monitor_all(self, pid, stats_dict):
-        cpu_ram_monitor = MonitorCPUAndRAM(interval=self.interval)
-        cpu_ram_stats = cpu_ram_monitor._monitor(pid=pid)
+        self.monitor_gpu = MonitorGPU(gpu_index=self.gpu_index, interval=self.interval)
+        self.monitor_cpu_and_ram = MonitorCPUAndRAM(interval=self.interval)
 
-        if self.use_gpu:
-            gpu_monitor = MonitorGPU(interval=self.interval)
-            gpu_stats = gpu_monitor._monitor(pid=pid, gpu_index=self.gpu_index)
-        else:
-            gpu_stats = {"gpu_utilisations": [], "gpu_vram_usages": []}
+    def monitor(self, target: Callable, args=(), kwargs=None):
 
-        stats_dict["cpu_usages"] = cpu_ram_stats["cpu_usages"]
-        stats_dict["ram_usages"] = cpu_ram_stats["ram_usages"]
-        stats_dict["gpu_utilisations"] = gpu_stats["gpu_utilisations"]
-        stats_dict["gpu_vram_usages"] = gpu_stats["gpu_vram_usages"]
+        if kwargs is None:
+            kwargs = {}
+        mp.set_start_method("spawn", force=True)
 
-    def monitor_function(self, func, *args, **kwargs):
-        manager = mp.Manager()
-        stats = manager.dict()
+        cpu_and_ram_result_container = mp.Manager().list()
+        gpu_result_container = mp.Manager().list()
 
-        def target(return_dict, *a, **kw):
-            result = func(*a, **kw)
-            return_dict["result"] = result
+        # Launch the target process
+        process = mp.Process(target=target, args=args, kwargs=kwargs)
+        process.start()
 
-        return_dict = manager.dict()
-        proc = mp.Process(target=target, args=(return_dict, *args), kwargs=kwargs)
-        proc.start()
+        # Launch the cpu & ram monitor process
+        cpu_and_ram_monitor_process = mp.Process(
+            target=self.monitor_cpu_and_ram.monitor_until_static,
+            args=(process.pid, self.interval, cpu_and_ram_result_container),
+        )
+        gpu_monitor_process = mp.Process(
+            target=self.monitor_gpu.monitor_until_static,
+            args=(self.gpu_index, process.pid, self.interval, gpu_result_container),
+        )
 
-        monitor_proc = mp.Process(target=self._monitor_all, args=(proc.pid, stats))
-        monitor_proc.start()
+        cpu_and_ram_monitor_process.start()
+        gpu_monitor_process.start()
 
-        proc.join()
-        monitor_proc.terminate()  # Ends monitor after function exits
+        # Wait for all to join
+        process.join()
+        cpu_and_ram_monitor_process.join()
+        gpu_monitor_process.join()
 
-        return {
-            "result": return_dict.get("result"),
-            "cpu_usages": list(stats.get("cpu_usages", [])),
-            "ram_usages": list(stats.get("ram_usages", [])),
-            "gpu_utilisations": list(stats.get("gpu_utilisations", [])),
-            "gpu_vram_usages": list(stats.get("gpu_vram_usages", [])),
-        }
+        return cpu_and_ram_result_container[0], gpu_result_container[0]
+
+def heavy_cpu_gpu_task():
+    import os
+
+    import torch
+
+    time.sleep(2)
+    print("Inside PID:", os.getpid())
+    a = torch.randn(5000, 50000, device="cuda:1")
+    for _ in range(10):
+        b = torch.matmul(a, a.T)
 
 
-# Example usage
 if __name__ == "__main__":
-
-    def heavy_cpu_gpu_task():
-        import torch
-
-        print("Inside PID:", os.getpid())
-        a = torch.randn(5000, 5000, device="cuda:0")
-        for _ in range(5):
-            b = torch.matmul(a, a.T)
-            time.sleep(2)
-
-    monitor = FullSystemMonitor(interval=0.1, gpu_index=0, use_gpu=True)
-    output = monitor.monitor_function(heavy_cpu_gpu_task)
-
-    print("--- Monitoring Summary ---")
-    print("CPU usage samples:", output["cpu_usages"])
-    print("RAM usage samples (MB):", [v / 1024**2 for v in output["ram_usages"]])
-    print("GPU utilisation samples:", output["gpu_utilisations"])
-    print("GPU VRAM usage samples (MB):", output["gpu_vram_usages"])
+    full_system_monitor = FullSystemMonitor(interval=0.01, gpu_index=1, use_gpu=True)
+    res = full_system_monitor.monitor(target=heavy_cpu_gpu_task)
+    print(res)
