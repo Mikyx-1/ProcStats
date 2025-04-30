@@ -1,12 +1,15 @@
+import logging
 import multiprocessing as mp
-import os
 import time
-from typing import Union
+from typing import Any, Callable, Dict, Tuple
 
-import numpy as np
 import psutil
 
-# GPU monitoring setup
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 try:
     from pynvml import (NVMLError, NVMLError_NotSupported,
                         nvmlDeviceGetComputeRunningProcesses,
@@ -19,130 +22,170 @@ except ImportError:
     PYNVML_AVAILABLE = False
 
 
-class MonitorGPU:
-    def __init__(self, gpu_index=0, interval=0.1):
-        self.gpu_index = gpu_index
-        self.interval = interval
-
-        if not PYNVML_AVAILABLE:
-            raise ImportError(
-                "pynvml is not available. Install it via `pip install nvidia-ml-py3`."
-            )
-
+def validate_gpu_index(gpu_index: int) -> bool:
+    """Validate the GPU index. Return True if valid, False if pynvml is unavailable or fails."""
+    if not PYNVML_AVAILABLE:
+        logging.error(
+            "pynvml is not available. Install it via `pip install nvidia-ml-py3` to enable GPU monitoring."
+        )
+        return False
+    try:
         nvmlInit()
         device_count = nvmlDeviceGetCount()
         if gpu_index >= device_count:
-            nvmlShutdown()
-            raise ValueError(
-                f"GPU index {gpu_index} is out of range (found {device_count} devices)."
+            logging.error(
+                f"GPU index {gpu_index} is out of range (found {device_count} devices). "
+                "Check your GPU index or NVIDIA driver installation."
             )
-
-        nvmlShutdown()  # Re-initialise inside subprocess later
-
-    @staticmethod
-    def monitor_until_static(gpu_index, pid, interval, result_container):
-        import psutil
-        from pynvml import (NVMLError, NVMLError_NotSupported,
-                            nvmlDeviceGetComputeRunningProcesses,
-                            nvmlDeviceGetHandleByIndex,
-                            nvmlDeviceGetProcessUtilization, nvmlInit,
-                            nvmlShutdown)
-
-        def sample_gpu_utilisation(handle, pid):
-            try:
-                proc_utils = nvmlDeviceGetProcessUtilization(handle, 1000)
-                for p in proc_utils:
-                    if p.pid == pid:
-                        return p.smUtil
-            except NVMLError_NotSupported:
-                print("Per-process GPU utilisation not supported.")
-            except NVMLError:
-                pass
-            return 0
-
-        def sample_gpu_vram(handle, pid):
-            try:
-                processes = nvmlDeviceGetComputeRunningProcesses(handle)
-                for p in processes:
-                    if p.pid == pid:
-                        return p.usedGpuMemory / 1024**2  # MB
-            except NVMLError:
-                pass
-            return 0
-
-        nvmlInit()
-        handle = nvmlDeviceGetHandleByIndex(gpu_index)
-
-        gpu_utils = []
-        vram_usages = []
-
-        try:
-            while psutil.pid_exists(pid) and psutil.Process(pid).is_running():
-                gpu_utils.append(sample_gpu_utilisation(handle, pid))
-                vram_usages.append(sample_gpu_vram(handle, pid))
-                time.sleep(interval)
-        finally:
-            nvmlShutdown()
-            result_container.append(
-                {
-                    "gpu_util_mean": (
-                        sum(gpu_utils) / len(gpu_utils) if gpu_utils else 0
-                    ),
-                    "gpu_util_max": max(gpu_utils, default=0),
-                    "vram_usage_mean": (
-                        sum(vram_usages) / len(vram_usages) if vram_usages else 0
-                    ),
-                    "vram_usage_max": max(vram_usages, default=0),
-                }
-            )
-
-    def monitor(self, target, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-
-        mp.set_start_method("spawn", force=True)
-        manager = mp.Manager()
-        result_container = manager.list()
-
-        # Launch target process
-        process = mp.Process(target=target, args=args, kwargs=kwargs)
-        process.start()
-
-        # Launch monitor process
-        monitor_proc = mp.Process(
-            target=MonitorGPU.monitor_until_static,
-            args=(self.gpu_index, process.pid, self.interval, result_container),
+            return False
+        nvmlShutdown()
+        return True
+    except NVMLError as e:
+        logging.error(
+            f"Failed to initialize NVML: {e}. Check NVIDIA driver installation or permissions."
         )
-        monitor_proc.start()
+        return False
 
-        # Wait for both
-        process.join()
-        monitor_proc.join()
 
+def _sample_gpu_utilisation(handle, pid: int) -> int:
+    try:
+        proc_utils = nvmlDeviceGetProcessUtilization(handle, 1000)
+        return next((p.smUtil for p in proc_utils if p.pid == pid), 0)
+    except (NVMLError_NotSupported, NVMLError):
+        return 0
+
+
+def _sample_gpu_vram(handle, pid: int) -> float:
+    try:
+        processes = nvmlDeviceGetComputeRunningProcesses(handle)
         return (
-            result_container[0]
-            if result_container
-            else {
+            next((p.usedGpuMemory for p in processes if p.pid == pid), 0) / 1024**2
+        )  # MB
+    except NVMLError:
+        return 0
+
+
+def monitor_gpu_utilization_by_pid(
+    gpu_index: int, pid: int, interval: float, result_container
+):
+    if not PYNVML_AVAILABLE or not validate_gpu_index(gpu_index):
+        result_container.append(
+            {
                 "gpu_util_mean": 0,
                 "gpu_util_max": 0,
                 "vram_usage_mean": 0,
                 "vram_usage_max": 0,
             }
         )
+        return
+
+    try:
+        nvmlInit()
+        handle = nvmlDeviceGetHandleByIndex(gpu_index)
+    except NVMLError as e:
+        logging.error(
+            f"Failed to access GPU {gpu_index}: {e}. Check NVIDIA driver or GPU availability."
+        )
+        result_container.append(
+            {
+                "gpu_util_mean": 0,
+                "gpu_util_max": 0,
+                "vram_usage_mean": 0,
+                "vram_usage_max": 0,
+            }
+        )
+        return
+
+    gpu_utils, vram_usages = [], []
+
+    try:
+        while psutil.pid_exists(pid) and psutil.Process(pid).is_running():
+            gpu_utils.append(_sample_gpu_utilisation(handle, pid))
+            vram_usages.append(_sample_gpu_vram(handle, pid))
+            time.sleep(interval)
+    except Exception:  # Catch any unexpected errors to ensure cleanup
+        pass
+    finally:
+        try:
+            nvmlShutdown()
+        except NVMLError:
+            logging.warning("Failed to shutdown NVML. This may indicate driver issues.")
+        result_container.append(
+            {
+                "gpu_util_mean": sum(gpu_utils) / len(gpu_utils) if gpu_utils else 0,
+                "gpu_util_max": max(gpu_utils, default=0),
+                "vram_usage_mean": (
+                    sum(vram_usages) / len(vram_usages) if vram_usages else 0
+                ),
+                "vram_usage_max": max(vram_usages, default=0),
+            }
+        )
 
 
-def heavy_cpu_gpu_task():
+def run_and_monitor_gpu_on_function(
+    target: Callable[..., Any],
+    args: Tuple = (),
+    kwargs: Dict[str, Any] = None,
+    gpu_index: int = 0,
+    interval: float = 0.1,
+) -> Dict[str, float]:
+    """Run a target function and monitor GPU utilization on the specified GPU.
+
+    Args:
+        target: The function to execute.
+        args: Positional arguments for the target function.
+        kwargs: Keyword arguments for the target function.
+        gpu_index: Index of the GPU to monitor.
+        interval: Sampling interval in seconds.
+
+    Returns:
+        Dictionary with mean/max GPU utilization and VRAM usage. Returns zeros if monitoring fails.
+    """
+    if kwargs is None:
+        kwargs = {}
+
+    mp.set_start_method("spawn", force=True)
+    manager = mp.Manager()
+    result_container = manager.list()
+
+    process = mp.Process(target=target, args=args, kwargs=kwargs)
+    process.start()
+
+    monitor_proc = mp.Process(
+        target=monitor_gpu_utilization_by_pid,
+        args=(gpu_index, process.pid, interval, result_container),
+    )
+    monitor_proc.start()
+
+    process.join()
+    monitor_proc.join()
+
+    return (
+        result_container[0]
+        if result_container
+        else {
+            "gpu_util_mean": 0,
+            "gpu_util_max": 0,
+            "vram_usage_mean": 0,
+            "vram_usage_max": 0,
+        }
+    )
+
+
+def heavy_gpu_task():
     import os
 
     import torch
 
-    print("Inside PID:", os.getpid())
-    a = torch.randn(5000, 5000, device="cuda:1")
-    for _ in range(1000):
-        b = torch.matmul(a, a.T)
+    print("PID:", os.getpid())
+    try:
+        a = torch.randn(5000, 5000, device="cuda:1")
+        for _ in range(1000):
+            b = torch.matmul(a, a.T)
+    except RuntimeError as e:
+        print(f"GPU task failed: {e}")
 
 
 if __name__ == "__main__":
-    monitor_gpu = MonitorGPU(gpu_index=1, interval=0.0001)
-    res = monitor_gpu.monitor(heavy_cpu_gpu_task)
-    print(f"res: {res}")
+    result = run_and_monitor_gpu_on_function(target=heavy_gpu_task, gpu_index=1, interval=0.01)
+    print("GPU Monitoring Result:", result)
