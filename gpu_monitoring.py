@@ -1,22 +1,18 @@
+import multiprocessing as mp
 import os
 import time
-import psutil
-import multiprocessing as mp
-import numpy as np
 from typing import Union
+
+import numpy as np
+import psutil
 
 # GPU monitoring setup
 try:
-    from pynvml import (
-        nvmlInit,
-        nvmlShutdown,
-        nvmlDeviceGetCount,
-        nvmlDeviceGetHandleByIndex,
-        nvmlDeviceGetComputeRunningProcesses,
-        nvmlDeviceGetProcessUtilization,
-        NVMLError,
-        NVMLError_NotSupported,
-    )
+    from pynvml import (NVMLError, NVMLError_NotSupported,
+                        nvmlDeviceGetComputeRunningProcesses,
+                        nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex,
+                        nvmlDeviceGetProcessUtilization, nvmlInit,
+                        nvmlShutdown)
 
     PYNVML_AVAILABLE = True
 except ImportError:
@@ -45,16 +41,12 @@ class MonitorGPU:
 
     @staticmethod
     def monitor_until_static(gpu_index, pid, interval, result_container):
-        from pynvml import (
-            nvmlInit,
-            nvmlShutdown,
-            nvmlDeviceGetHandleByIndex,
-            nvmlDeviceGetComputeRunningProcesses,
-            nvmlDeviceGetProcessUtilization,
-            NVMLError,
-            NVMLError_NotSupported,
-        )
         import psutil
+        from pynvml import (NVMLError, NVMLError_NotSupported,
+                            nvmlDeviceGetComputeRunningProcesses,
+                            nvmlDeviceGetHandleByIndex,
+                            nvmlDeviceGetProcessUtilization, nvmlInit,
+                            nvmlShutdown)
 
         def sample_gpu_utilisation(handle, pid):
             try:
@@ -140,8 +132,9 @@ class MonitorGPU:
 
 
 def heavy_cpu_gpu_task():
-    import torch
     import os
+
+    import torch
 
     print("Inside PID:", os.getpid())
     a = torch.randn(5000, 5000, device="cuda:1")
