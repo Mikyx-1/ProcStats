@@ -3,51 +3,45 @@ import os
 import time
 from typing import Callable
 
-from cpu_ram_monitoring import MonitorCPUAndRAM
-from gpu_monitoring import MonitorGPU
+from cpu_ram_monitoring import monitor_cpu_and_ram_by_pid
+from gpu_monitoring import monitor_gpu_utilization_by_pid
 
 
-class FullSystemMonitor:
-    def __init__(self, interval=0.1, gpu_index=0, use_gpu=True):
-        self.interval = interval
-        self.gpu_index = gpu_index
-        self.use_gpu = use_gpu
+def full_resource_monitor(
+    target: Callable, args=(), kwargs=None, interval=0.01, gpu_index=0
+):
 
-        self.monitor_gpu = MonitorGPU(gpu_index=self.gpu_index, interval=self.interval)
-        self.monitor_cpu_and_ram = MonitorCPUAndRAM(interval=self.interval)
+    if kwargs is None:
+        kwargs = {}
+    mp.set_start_method("spawn", force=True)
 
-    def monitor(self, target: Callable, args=(), kwargs=None):
+    cpu_and_ram_result_container = mp.Manager().list()
+    gpu_result_container = mp.Manager().list()
 
-        if kwargs is None:
-            kwargs = {}
-        mp.set_start_method("spawn", force=True)
+    # Launch processes
+    process = mp.Process(target=target, args=args, kwargs=kwargs)
+    process.start()
 
-        cpu_and_ram_result_container = mp.Manager().list()
-        gpu_result_container = mp.Manager().list()
+    cpu_and_ram_monitor_process = mp.Process(
+        target=monitor_cpu_and_ram_by_pid,
+        args=(process.pid, interval, cpu_and_ram_result_container),
+    )
+    gpu_monitor_process = mp.Process(
+        target=monitor_gpu_utilization_by_pid,
+        args=(gpu_index, process.pid, interval, gpu_result_container),
+    )
 
-        # Launch the target process
-        process = mp.Process(target=target, args=args, kwargs=kwargs)
-        process.start()
+    # Start processes
+    cpu_and_ram_monitor_process.start()
+    gpu_monitor_process.start()
 
-        # Launch the cpu & ram monitor process
-        cpu_and_ram_monitor_process = mp.Process(
-            target=self.monitor_cpu_and_ram.monitor_until_static,
-            args=(process.pid, self.interval, cpu_and_ram_result_container),
-        )
-        gpu_monitor_process = mp.Process(
-            target=self.monitor_gpu.monitor_until_static,
-            args=(self.gpu_index, process.pid, self.interval, gpu_result_container),
-        )
+    # Join processes
+    process.join()
+    cpu_and_ram_monitor_process.join()
+    gpu_monitor_process.join()
 
-        cpu_and_ram_monitor_process.start()
-        gpu_monitor_process.start()
+    return cpu_and_ram_result_container[0], gpu_result_container[0]
 
-        # Wait for all to join
-        process.join()
-        cpu_and_ram_monitor_process.join()
-        gpu_monitor_process.join()
-
-        return cpu_and_ram_result_container[0], gpu_result_container[0]
 
 def heavy_cpu_gpu_task():
     import os
@@ -56,12 +50,11 @@ def heavy_cpu_gpu_task():
 
     time.sleep(2)
     print("Inside PID:", os.getpid())
-    a = torch.randn(5000, 50000, device="cuda:1")
+    a = torch.randn(5000, 5000, device="cuda:1")
     for _ in range(10):
         b = torch.matmul(a, a.T)
 
 
 if __name__ == "__main__":
-    full_system_monitor = FullSystemMonitor(interval=0.01, gpu_index=1, use_gpu=True)
-    res = full_system_monitor.monitor(target=heavy_cpu_gpu_task)
+    res = full_resource_monitor(heavy_cpu_gpu_task, gpu_index=1)
     print(res)
