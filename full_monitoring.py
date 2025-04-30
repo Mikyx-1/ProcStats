@@ -41,7 +41,9 @@ def full_resource_monitor(
     kwargs: Optional[Dict[str, Any]] = None,
     interval: float = 0.01,
     gpu_index: Union[int, List[int], None] = 0,
-) -> Tuple[Dict[str, float], Union[Dict[str, float], List[Dict[str, float]]]]:
+    timeout: Optional[float] = None,
+    monitor: str = "both",
+) -> Dict[str, Optional[Union[Dict[str, float], Dict[str, Dict[str, float]]]]]:
     """
     Monitor CPU, RAM, and GPU usage of a target process.
 
@@ -51,18 +53,28 @@ def full_resource_monitor(
         kwargs: Keyword arguments for the target function.
         interval: Monitoring interval in seconds.
         gpu_index: GPU index (int), list of indices (List[int]), or None to monitor all GPUs.
+        timeout: Timeout in seconds (None for no timeout).
+        monitor: Monitoring component ("cpu", "gpu", "both", or "none"). Defaults to "both" if invalid.
 
     Returns:
-        Tuple of (cpu_results, gpu_results), where:
-        - cpu_results is a dictionary with CPU and RAM metrics.
-        - gpu_results is a dictionary (single GPU) or list of dictionaries (multiple GPUs).
+        Dictionary with keys:
+        - "cpu": Dict with CPU/RAM metrics or None if not monitoring CPU.
+        - "gpu": Dict mapping GPU indices to metrics (e.g., {"0": {...}, "1": {...}}) or None if not monitoring GPU.
     """
     if kwargs is None:
         kwargs = {}
 
+    # Validate monitor parameter
+    valid_monitors = {"cpu", "gpu", "both", "none"}
+    if monitor not in valid_monitors:
+        logging.warning(f"Invalid monitor value: {monitor}. Defaulting to 'both'")
+        monitor = "both"
+
     mp.set_start_method("spawn", force=True)
     manager = mp.Manager()
-    cpu_and_ram_result_container = manager.list()
+    cpu_and_ram_result_container = (
+        manager.list() if monitor in {"cpu", "both"} else None
+    )
     gpu_result_containers = []  # List to hold result containers for each GPU
 
     # Initialize process variables to avoid UnboundLocalError
@@ -70,37 +82,42 @@ def full_resource_monitor(
     cpu_and_ram_monitor_process = None
     gpu_monitor_processes = []
 
-    # Prepare GPU indices
+    # Prepare GPU indices (only if monitoring GPU)
     gpu_indices = []
-    if gpu_index is None:
-        gpu_indices = get_all_gpu_indices()
-        logging.info(f"Monitoring all available GPUs: {gpu_indices}")
-    elif isinstance(gpu_index, int):
-        gpu_indices = [gpu_index]
-        logging.info(f"Monitoring single GPU: {gpu_index}")
-    elif isinstance(gpu_index, list):
-        gpu_indices = gpu_index
-        logging.info(f"Monitoring specified GPUs: {gpu_index}")
+    if monitor in {"gpu", "both"}:
+        if gpu_index is None:
+            gpu_indices = get_all_gpu_indices()
+            logging.info(f"Monitoring all available GPUs: {gpu_indices}")
+        elif isinstance(gpu_index, int):
+            gpu_indices = [gpu_index]
+            logging.info(f"Monitoring single GPU: {gpu_index}")
+        elif isinstance(gpu_index, list):
+            gpu_indices = gpu_index
+            logging.info(f"Monitoring specified GPUs: {gpu_index}")
+        else:
+            logging.error(
+                f"Invalid gpu_index type: {type(gpu_index)}. Must be int, List[int], or None."
+            )
+            gpu_indices = []
     else:
-        logging.error(
-            f"Invalid gpu_index type: {type(gpu_index)}. Must be int, List[int], or None."
-        )
-        gpu_indices = []
+        logging.info("GPU monitoring disabled")
 
     # Validate each GPU index
     valid_gpu_indices = []
-    for idx in gpu_indices:
-        if not isinstance(idx, int):
-            logging.error(f"Invalid GPU index: {idx}. Must be an integer.")
-            continue
-        if validate_gpu_index(idx):
-            valid_gpu_indices.append(idx)
-        else:
-            logging.warning(f"Skipping GPU index {idx} due to validation failure")
+    if monitor in {"gpu", "both"}:
+        for idx in gpu_indices:
+            if not isinstance(idx, int):
+                logging.error(f"Invalid GPU index: {idx}. Must be an integer.")
+                continue
+            if validate_gpu_index(idx):
+                valid_gpu_indices.append(idx)
+            else:
+                logging.warning(f"Skipping GPU index {idx} due to validation failure")
 
     # Create result containers for each valid GPU
-    for _ in valid_gpu_indices:
-        gpu_result_containers.append(manager.list())
+    if monitor in {"gpu", "both"}:
+        for _ in valid_gpu_indices:
+            gpu_result_containers.append(manager.list())
 
     try:
         # Launch the target process
@@ -112,29 +129,46 @@ def full_resource_monitor(
             raise ValueError("Target process PID is None")
         logging.info(f"Target process started with PID {pid}")
 
-        # Launch CPU/RAM monitoring process
-        cpu_and_ram_monitor_process = mp.Process(
-            target=monitor_cpu_and_ram_by_pid,
-            args=(pid, interval, cpu_and_ram_result_container),
-        )
-        cpu_and_ram_monitor_process.start()
-        logging.info("CPU and RAM monitoring started")
-
-        # Launch GPU monitoring processes
-        for idx, container in zip(valid_gpu_indices, gpu_result_containers):
-            gpu_proc = mp.Process(
-                target=monitor_gpu_utilization_by_pid,
-                args=(idx, pid, interval, container),
+        # Launch CPU/RAM monitoring process (if enabled)
+        if monitor in {"cpu", "both"}:
+            cpu_and_ram_monitor_process = mp.Process(
+                target=monitor_cpu_and_ram_by_pid,
+                args=(pid, interval, cpu_and_ram_result_container),
             )
-            gpu_proc.start()
-            gpu_monitor_processes.append(gpu_proc)
-            logging.info(f"GPU monitoring started for GPU index {idx}")
+            cpu_and_ram_monitor_process.start()
+            logging.info("CPU and RAM monitoring started")
+        else:
+            logging.info("CPU and RAM monitoring disabled")
 
-        # Join processes
-        process.join()
+        # Launch GPU monitoring processes (if enabled)
+        if monitor in {"gpu", "both"}:
+            for idx, container in zip(valid_gpu_indices, gpu_result_containers):
+                gpu_proc = mp.Process(
+                    target=monitor_gpu_utilization_by_pid,
+                    args=(idx, pid, interval, container),
+                )
+                gpu_proc.start()
+                gpu_monitor_processes.append(gpu_proc)
+                logging.info(f"GPU monitoring started for GPU index {idx}")
+        else:
+            logging.info("No GPU monitoring processes started")
+
+        # Join target process with optional timeout
+        process.join(timeout)
+        if process.is_alive():
+            logging.warning(f"Target process timed out after {timeout} seconds")
+            process.terminate()
+            process.join()
+            raise TimeoutError(
+                f"Target process did not complete within {timeout} seconds"
+            )
         logging.info("Target process completed")
-        cpu_and_ram_monitor_process.join()
-        logging.info("CPU/RAM monitoring process completed")
+
+        # Join monitoring processes
+        if monitor in {"cpu", "both"} and cpu_and_ram_monitor_process:
+            cpu_and_ram_monitor_process.join()
+            logging.info("CPU/RAM monitoring process completed")
+
         for idx, proc in zip(valid_gpu_indices, gpu_monitor_processes):
             proc.join()
             logging.info(f"GPU monitoring process for GPU index {idx} completed")
@@ -142,27 +176,15 @@ def full_resource_monitor(
         # Collect results
         cpu_results = (
             cpu_and_ram_result_container[0]
-            if cpu_and_ram_result_container
-            else {"cpu_max": 0, "cpu_avg": 0, "ram_max": 0.0, "ram_avg": 0}
+            if monitor in {"cpu", "both"} and cpu_and_ram_result_container
+            else None
         )
 
-        if not valid_gpu_indices:
-            gpu_results = []  # Empty list if no valid GPUs
-            logging.info("No valid GPUs monitored")
-        elif len(valid_gpu_indices) == 1:
-            gpu_results = (
-                gpu_result_containers[0][0]
-                if gpu_result_containers[0]
-                else {
-                    "gpu_util_mean": 0,
-                    "gpu_util_max": 0,
-                    "vram_usage_mean": 0,
-                    "vram_usage_max": 0,
-                }
-            )
-        else:
-            gpu_results = [
-                (
+        gpu_results = None
+        if monitor in {"gpu", "both"} and valid_gpu_indices:
+            gpu_results = {}
+            for idx, container in zip(valid_gpu_indices, gpu_result_containers):
+                gpu_results[str(idx)] = (
                     container[0]
                     if container
                     else {
@@ -172,10 +194,11 @@ def full_resource_monitor(
                         "vram_usage_max": 0,
                     }
                 )
-                for container in gpu_result_containers
-            ]
+        elif monitor in {"gpu", "both"}:
+            logging.info("No valid GPUs monitored")
 
-        return cpu_results, gpu_results
+        # Return results
+        return {"cpu": cpu_results, "gpu": gpu_results}
 
     except Exception as e:
         logging.error(f"Monitoring failed: {str(e)}")
@@ -200,16 +223,17 @@ def heavy_cpu_gpu_task():
 
     time.sleep(2)
     print("Inside PID:", os.getpid())
-    try:
-        a = torch.randn(5000, 5000, device="cuda:1")
-        for _ in range(10):
-            b = torch.matmul(a, a.T)
-    except RuntimeError as e:
-        print(f"GPU task failed: {e}")
 
+    a = torch.randn(5000, 5000, device="cuda:1")
+    for _ in range(10):
+        b = torch.matmul(a, a.T)
 
 if __name__ == "__main__":
-
-    # Example with all GPUs (None)
-    result = full_resource_monitor(heavy_cpu_gpu_task, gpu_index=None)
-    print("All GPUs Result:", result)
+    # Example with all GPUs, timeout, and both CPU/GPU monitoring
+    start_time = time.time()
+    result = full_resource_monitor(
+        heavy_cpu_gpu_task, gpu_index=None, timeout=3.0, monitor="gpu"
+    )
+    print("Both CPU and GPU Result (with timeout):", result)
+    stop_time = time.time()
+    print(f"Duration: {stop_time - start_time}")
