@@ -3,8 +3,8 @@ import multiprocessing as mp
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from cpu_ram_monitoring import monitor_cpu_and_ram_by_pid
-from gpu_monitoring import monitor_gpu_utilization_by_pid, validate_gpu_index
+from .cpu_ram_monitoring import monitor_cpu_and_ram_by_pid
+from .gpu_monitoring import monitor_gpu_utilization_by_pid, validate_gpu_index
 
 # Configure logging
 logging.basicConfig(
@@ -215,25 +215,5 @@ def full_resource_monitor(
                 proc.join()
         logging.info("All processes terminated")
 
-
-def heavy_cpu_gpu_task():
-    import os
-
-    import torch
-
-    time.sleep(2)
-    print("Inside PID:", os.getpid())
-
-    a = torch.randn(5000, 5000, device="cuda:1")
-    for _ in range(10):
-        b = torch.matmul(a, a.T)
-
 if __name__ == "__main__":
-    # Example with all GPUs, timeout, and both CPU/GPU monitoring
-    start_time = time.time()
-    result = full_resource_monitor(
-        heavy_cpu_gpu_task, gpu_index=None, timeout=3.0, monitor="gpu"
-    )
-    print("Both CPU and GPU Result (with timeout):", result)
-    stop_time = time.time()
-    print(f"Duration: {stop_time - start_time}")
+    pass

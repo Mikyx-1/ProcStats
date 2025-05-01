@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "procstats"
+version = "0.1.0"
+description = "A Python package for monitoring CPU, RAM, and GPU usage of processes"
+readme = "README.md"
+authors = [{name = "Le Hoang Viet", email = "lehoangviet2k@gmail.com"}]
+license = {file = "LICENSE"}
+requires-python = ">=3.6"
+dependencies = [
+    "psutil>=5.9.0",
+    "pynvml>=11.0.0",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/Mikyx-1/ProcStats"
+Repository = "https://github.com/Mikyx-1/ProcStats"
