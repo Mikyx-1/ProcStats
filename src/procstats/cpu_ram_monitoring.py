@@ -6,29 +6,37 @@ import psutil
 
 
 def monitor_cpu_and_ram_by_pid(pid: int, interval: float, result_container: list):
-    """Monitor CPU and RAM usage of a process until it terminates."""
+
     cpu_usages = []
     ram_usages = []
 
     try:
         proc = psutil.Process(pid)
-        proc.cpu_percent(interval=interval)
+        proc.cpu_percent(interval=interval)  # Prime the CPU meter
 
-        while psutil.pid_exists(pid) and psutil.Process(pid).is_running():
-            cpu_percent = proc.cpu_percent(interval=None)
-            ram_usage = proc.memory_info().rss
-            cpu_usages.append(cpu_percent)
-            ram_usages.append(ram_usage)
-            time.sleep(interval)
+        while True:
+            try:
+                if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                    break
+                cpu_percent = proc.cpu_percent(interval=None)
+                ram_usage = proc.memory_info().rss
+                cpu_usages.append(cpu_percent)
+                ram_usages.append(ram_usage)
+                time.sleep(interval)
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, ProcessLookupError):
+                break
+            except Exception as e:
+                print(f"[Monitor] Warning: {e}")
+                break
 
     finally:
         result_container.append(
             {
                 "cpu_max": max(cpu_usages, default=0),
                 "cpu_avg": sum(cpu_usages) / len(cpu_usages) if cpu_usages else 0,
-                "ram_max": max(ram_usages, default=0) / 1024**2,  # Convert to MB
+                "ram_max": max(ram_usages, default=0) / 1024**2,
                 "ram_avg": (
-                    sum(ram_usages) / len(ram_usages) / 1024**2 if ram_usages else 0
+                    (sum(ram_usages) / len(ram_usages) / 1024**2) if ram_usages else 0
                 ),
             }
         )
