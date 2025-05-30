@@ -187,5 +187,7 @@ def heavy_gpu_task():
 
 
 if __name__ == "__main__":
-    result = run_and_monitor_gpu_on_function(target=heavy_gpu_task, gpu_index=1, interval=0.01)
+    result = run_and_monitor_gpu_on_function(
+        target=heavy_gpu_task, gpu_index=1, interval=0.01
+    )
     print("GPU Monitoring Result:", result)
