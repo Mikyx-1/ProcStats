@@ -1,25 +1,197 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["py", "wheel", "pybind11>=2.6.0"]
+build-backend = "0"
 
 [project]
 name = "procstats"
 version = "0.1.0"
-description = "A Python package for monitoring CPU, RAM, and GPU usage of processes"
-readme = "README.md"
-authors = [{name = "Le Hoang Viet", email = "lehoangviet2k@gmail.com"}]
-license = {file = "LICENSE"}
-requires-python = ">=3.6"
-dependencies = [
-    "psutil>=5.9.0",
-    "pynvml>=11.0.0",
+description = "Combined CPU, RAM, and GPU resource monitoring with child process tracking"
+authors = [
+    { name = "Le Hoang Viet", email = "lehoangviet2k@gmail.com" }
 ]
+dependencies = [
+    "pybind11>=2.6.0",
+    "cloudpickle",
+]
+requires-python = ">=3.6"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
 ]
 
 [project.urls]
 Homepage = "https://github.com/Mikyx-1/ProcStats"
-Repository = "https://github.com/Mikyx-1/ProcStats"
+```
+
+**Notes**:
+- Syncs metadata with `setup.py`.
+- Specifies `setuptools` as the build backend.
+- Update `email` and `Homepage`.
+
+#### Update `README.md`
+Ensure `README.md` includes installation and usage instructions:
+
+```markdown
+# ProcStats
+
+A Python module for monitoring CPU, RAM, and GPU resources, including child process tracking.
+
+## Installation
+
+```bash
+pip install procstats
+```
+
+## Requirements
+
+- Linux (x86_64)
+- Python 3.6+
+- NVIDIA GPU with `libnvidia-ml.so` (e.g., driver version 535) for GPU monitoring
+- Install dependencies:
+  ```bash
+  sudo apt-get install nvidia-driver-535 nvidia-driver
+  sudo apt-get update
+  ```
+
+## Usage
+
+```python
+from procstats import combined_resource_monitor
+
+def example_function():
+    # Your code here
+    pass
+
+result = combined_resource_monitor(target=example_function, timeout=10.0, interval=0.1)
+print(result)
+```
+
+## Troubleshooting
+
+If you encounter `libnvidia-ml.so` errors, ensure NVIDIA drivers are installed and update the linker cache:
+```bash
+sudo ldconfig
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+```
+
+For detailed build instructions, see [CONTRIBUTING.md](#) (optional).
+```
+
+### Step 3: Compile the Package
+
+1. **Install Build Tools**:
+   ```bash
+   pip install build wheel twine auditwheel
+   ```
+
+2. **Build Source Distribution and Wheel**:
+   ```bash
+   cd ~/Desktop/python_projects/ProcStats
+   python -m build
+   ```
+   This creates `dist/procstats-0.1.0.tar.gz` (source) and `dist/procstats-0.1.0-cp311-cp311-linux_x86_64.whl` (wheel).
+
+3. **Repair Wheel for Portability** (Optional):
+   To make the wheel compatible with other Linux distributions, use `auditwheel` to bundle `libnvidia-ml.so`:
+   ```bash
+   auditwheel repair dist/procstats-0.1.0-cp311-cp311-linux_x86_64.whl
+   ```
+   The repaired wheel (e.g., `wheelhouse/procstats-0.1.0-cp311-cp311-manylinux_2_17_x86_64.whl`) includes dependencies, improving portability.
+
+4. **Test the Package Locally**:
+   Create a clean virtual environment:
+   ```bash
+   python -m venv testenv
+   source testenv/bin/activate
+   pip install dist/procstats-0.1.0-cp311-cp311-linux_x86_64.whl
+   ```
+   Run a test:
+   ```bash
+   python -m procstats.scripts.test_lib
+   ```
+   If `auditwheel` was used, test the `manylinux` wheel instead.
+
+### Step 4: Publish to PyPI
+
+1. **Create a PyPI Account**:
+   Sign up at https://pypi.org/account/register/ or https://test.pypi.org/ (for testing).
+
+2. **Upload to Test PyPI** (Optional):
+   ```bash
+   twine upload --repository testpypi dist/*
+   ```
+   Install from Test PyPI to verify:
+   ```bash
+   pip install --index-url https://test.pypi.org/simple/ procstats
+   ```
+
+3. **Upload to PyPI**:
+   ```bash
+   twine upload dist/*
+   ```
+   Users can then install with:
+   ```bash
+   pip install procstats
+   ```
+
+### Step 5: Additional Notes
+
+- **NVIDIA Driver Dependency**:
+  Document that users need NVIDIA drivers (version ~535) for GPU monitoring. The package will work without GPUs for CPU/RAM monitoring, as your code handles missing NVML gracefully.
+
+- **Testing**:
+  Run tests from `src/procstats/tests`:
+  ```bash
+  python -m procstats.tests.test_burn_cpu_ram
+  ```
+  Consider adding a test suite (e.g., using `pytest`) to `setup.py`:
+  ```python
+  setup(
+      ...
+      setup_requires=["pytest-runner"],
+      tests_require=["pytest"],
+  )
+  ```
+
+- **Versioning**:
+  Update `version` in `setup.py`, `pyproject.toml`, and `__init__.py` for future releases (e.g., `0.1.1`).
+
+- **GitHub Repository**:
+  Host your project on GitHub for visibility. Update `url` and `Homepage` in `setup.py` and `pyproject.toml` with the repo URL.
+
+- **Troubleshooting Build Issues**:
+  If compilation fails due to `libnvidia-ml.so`, ensure paths in `setup.py` match your system:
+  ```bash
+  find /usr -name libnvidia-ml.so*
+  ```
+  Update `library_dirs` if needed.
+
+### Example Usage After Installation
+
+After installing via `pip install procstats`, users can do:
+
+```python
+from procstats import combined_resource_monitor
+
+def example_function():
+    import time
+    time.sleep(1)
+
+result = combined_resource_monitor(example_function)
+print(result)
+```
+
+### If You Encounter Issues
+
+- **Build Errors**: Share the output of `python -m build --no-isolation`.
+- **PyPI Upload Errors**: Share the `twine upload` error message.
+- **Testing Issues**: Share the output of running `test_lib.py` in a clean environment.
+
+Let me know if you need help with specific steps, such as debugging build issues, setting up GitHub, or adding tests!
