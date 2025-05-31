@@ -1,39 +1,43 @@
 # ProcStats
 
-ProcStats is a Python package for monitoring CPU, RAM, and GPU usage of processes. It provides tools to track resource utilization in real-time, making it ideal for profiling heavy computational tasks.
+A Python module for monitoring CPU, RAM, and GPU resources, including child process tracking.
 
 ## Installation
 
-Install ProcStats via pip:
-
 ```bash
-pip install ProcStats
-```
-
-## Usage
-
-Monitor CPU, RAM, and GPU usage of a target function:
-
-```python
-from procstats import full_resource_monitor
-
-def heavy_task():
-    import torch
-    a = torch.randn(5000, 5000, device="cuda:0")
-    for _ in range(10):
-        b = torch.matmul(a, a.T)
-
-result = full_resource_monitor(heavy_task, gpu_index=None, timeout=10.0, monitor="both")
-print("Monitoring Results:", result)
+pip install procstats
 ```
 
 ## Requirements
 
-- Python >= 3.8
-- psutil>=5.9.0
-- pynvml>=11.0.0
-- torch>=1.10.0
+- Linux (x86_64)
+- Python 3.6+
+- NVIDIA GPU with `libnvidia-ml.so` (e.g., driver version 535) for GPU monitoring
+- Install dependencies:
+  ```bash
+  sudo apt-get update
+  sudo apt-get install nvidia-driver-535
+  ```
 
-## License
+## Usage
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+```python
+from procstats import combined_resource_monitor
+
+def example_function():
+    # Your code here
+    pass
+
+result = combined_resource_monitor(target=example_function, timeout=10.0, interval=0.1)
+print(result)
+```
+
+## Troubleshooting
+
+If you encounter `libnvidia-ml.so` errors, ensure NVIDIA drivers are installed and update the linker cache:
+```bash
+sudo ldconfig
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+```
+
+For detailed build instructions, see [CONTRIBUTING.md](#) (optional).
