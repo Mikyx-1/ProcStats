@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <cctype>
 #include <atomic>
+#include <ctime>
 
 namespace py = pybind11;
 
@@ -41,31 +42,29 @@ struct MonitorStats {
     size_t max_process_count = 0;
     int num_cores = 0;
     std::string cpu_type;
-    std::string architecture;
+    std::string cpu_architecture;
     double total_ram_mb = 0.0;
 };
 
-// Structure from gpu_monitoring.cpp
-struct GpuUtilStats {
+// Structure for GPU-specific information
+struct GpuInfo {
+    std::string name;
+    std::string architecture;
+    double total_vram_mb = 0.0;
     double gpu_util_mean = 0.0;
     unsigned int gpu_util_max = 0;
     bool process_found = false;
     bool process_has_memory = false;
     unsigned long long memory_used = 0;
-    std::string error_msg = "";
-    std::string method_used = "";
-    std::vector<double> utilization_samples;
-    double execution_time_seconds = 0.0;
-    py::object function_result;
-    bool function_success = false;
-    std::string function_error = "";
-    unsigned int monitored_pid = 0;
 };
 
 // Combined monitoring stats
 struct CombinedStats {
     MonitorStats cpu_stats;
-    GpuUtilStats gpu_stats;
+    std::vector<GpuInfo> gpu_stats;
+    double execution_time_seconds = 0.0;
+    std::string execution_start_time;
+    std::string gpu_error_msg;
 };
 
 // Function declarations from cpu_monitoring.cpp
@@ -80,24 +79,27 @@ ProcessInfo get_process_info(pid_t pid);
 ProcessInfo get_process_tree_info(const std::set<pid_t>& pids);
 long get_system_cpu_time();
 double calculate_cpu_percentage(const ProcessInfo& prev, const ProcessInfo& curr,
-                             long prev_system, long curr_system, int num_cores);
+                               long prev_system, long curr_system, int num_cores);
 
-// GPU monitoring function
-void background_monitor_pid(unsigned int target_pid, unsigned int gpu_index, double interval_seconds, 
-                           std::atomic<bool>& should_stop, std::vector<double>& samples, 
-                           std::atomic<unsigned long long>& max_memory, std::atomic<bool>& process_found) {
+// GPU monitoring function for all GPUs
+void background_monitor_pid(unsigned int target_pid, double interval_seconds, 
+                           std::atomic<bool>& should_stop, std::vector<std::vector<double>>& gpu_samples, 
+                           std::vector<unsigned long long>& max_memories, 
+                           std::vector<bool>& process_founds, unsigned int device_count) {
     nvmlReturn_t nvml_result = nvmlInit_v2();
     if (nvml_result != NVML_SUCCESS) {
         std::cerr << "NVML init failed: " << nvmlErrorString(nvml_result) << std::endl;
         return;
     }
 
-    nvmlDevice_t device;
-    nvml_result = nvmlDeviceGetHandleByIndex(gpu_index, &device);
-    if (nvml_result != NVML_SUCCESS) {
-        std::cerr << "Failed to get device: " << nvmlErrorString(nvml_result) << std::endl;
-        nvmlShutdown();
-        return;
+    std::vector<nvmlDevice_t> devices(device_count);
+    for (unsigned int i = 0; i < device_count; ++i) {
+        nvml_result = nvmlDeviceGetHandleByIndex(i, &devices[i]);
+        if (nvml_result != NVML_SUCCESS) {
+            std::cerr << "Failed to get device " << i << ": " << nvmlErrorString(nvml_result) << std::endl;
+            nvmlShutdown();
+            return;
+        }
     }
 
     std::vector<unsigned long long> time_windows = {500, 1000, 2000, 5000, 10000};
@@ -107,38 +109,39 @@ void background_monitor_pid(unsigned int target_pid, unsigned int gpu_index, dou
             break;
         }
 
-        unsigned int processCount = 128;
-        nvmlProcessInfo_t processes[128];
-        nvml_result = nvmlDeviceGetComputeRunningProcesses(device, &processCount, processes);
-        
-        if (nvml_result == NVML_SUCCESS) {
-            for (unsigned int i = 0; i < processCount; ++i) {
-                if (processes[i].pid == target_pid) {
-                    process_found.store(true);
-                    unsigned long long current_memory = max_memory.load();
-                    if (processes[i].usedGpuMemory > current_memory) {
-                        max_memory.store(processes[i].usedGpuMemory);
-                    }
-                    break;
-                }
-            }
-        }
-
-        bool found_util = false;
-        for (auto time_window : time_windows) {
-            unsigned int sampleCount = 128;
-            nvmlProcessUtilizationSample_t util_samples[128];
+        for (unsigned int i = 0; i < device_count; ++i) {
+            unsigned int processCount = 128;
+            nvmlProcessInfo_t processes[128];
+            nvml_result = nvmlDeviceGetComputeRunningProcesses(devices[i], &processCount, processes);
             
-            nvml_result = nvmlDeviceGetProcessUtilization(device, util_samples, &sampleCount, time_window);
-            if (nvml_result == NVML_SUCCESS && sampleCount > 0) {
-                for (unsigned int j = 0; j < sampleCount; ++j) {
-                    if (util_samples[j].pid == target_pid && util_samples[j].smUtil > 0) {
-                        samples.push_back(static_cast<double>(util_samples[j].smUtil));
-                        found_util = true;
+            if (nvml_result == NVML_SUCCESS) {
+                for (unsigned int j = 0; j < processCount; ++j) {
+                    if (processes[j].pid == target_pid) {
+                        process_founds[i] = true;
+                        if (processes[j].usedGpuMemory > max_memories[i]) {
+                            max_memories[i] = processes[j].usedGpuMemory;
+                        }
                         break;
                     }
                 }
-                if (found_util) break;
+            }
+
+            bool found_util = false;
+            for (auto time_window : time_windows) {
+                unsigned int sampleCount = 128;
+                nvmlProcessUtilizationSample_t util_samples[128];
+                
+                nvml_result = nvmlDeviceGetProcessUtilization(devices[i], util_samples, &sampleCount, time_window);
+                if (nvml_result == NVML_SUCCESS && sampleCount > 0) {
+                    for (unsigned int j = 0; j < sampleCount; ++j) {
+                        if (util_samples[j].pid == target_pid && util_samples[j].smUtil > 0) {
+                            gpu_samples[i].push_back(static_cast<double>(util_samples[j].smUtil));
+                            found_util = true;
+                            break;
+                        }
+                    }
+                    if (found_util) break;
+                }
             }
         }
 
@@ -148,17 +151,22 @@ void background_monitor_pid(unsigned int target_pid, unsigned int gpu_index, dou
     nvmlShutdown();
 }
 
-CombinedStats combined_monitor_process_tree(pid_t root_pid, unsigned int gpu_index, 
-                                         double interval_sec, double timeout_sec) {
+CombinedStats combined_monitor_process_tree(pid_t root_pid, double interval_sec, double timeout_sec) {
     CombinedStats result;
     std::vector<double> ram_samples;
     std::vector<double> cpu_samples;
-    std::vector<double> gpu_samples;
-    std::atomic<unsigned long long> max_gpu_memory(0);
-    std::atomic<bool> gpu_process_found(false);
+    std::vector<std::vector<double>> gpu_samples;
+    std::vector<unsigned long long> max_gpu_memories;
+    std::vector<bool> gpu_process_founds;
     std::atomic<bool> should_stop(false);
     
     const auto start_time = std::chrono::steady_clock::now();
+    auto start_time_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::stringstream ss;
+    ss << std::ctime(&start_time_t);
+    result.execution_start_time = ss.str();
+    result.execution_start_time.erase(result.execution_start_time.find_last_not_of("\n\r") + 1);
+
     const auto interval_duration = std::chrono::duration<double>(interval_sec);
     const double min_interval = 0.01;
     
@@ -166,15 +174,76 @@ CombinedStats combined_monitor_process_tree(pid_t root_pid, unsigned int gpu_ind
         interval_sec = min_interval;
     }
     
+    // Initialize CPU-related stats
     int num_cores = get_cpu_cores();
     result.cpu_stats.num_cores = num_cores;
     result.cpu_stats.cpu_type = get_cpu_type();
-    result.cpu_stats.architecture = get_cpu_architecture();
+    result.cpu_stats.cpu_architecture = get_cpu_architecture();
     result.cpu_stats.total_ram_mb = get_total_ram_mb();
     
-    std::thread gpu_monitor_thread(background_monitor_pid, root_pid, gpu_index, interval_sec,
-                                 std::ref(should_stop), std::ref(gpu_samples),
-                                 std::ref(max_gpu_memory), std::ref(gpu_process_found));
+    // Initialize GPU-related stats
+    unsigned int device_count = 0;
+    bool gpu_available = true;
+    nvmlReturn_t nvml_result = nvmlInit_v2();
+    if (nvml_result != NVML_SUCCESS) {
+        result.gpu_error_msg = "NVML init failed: " + std::string(nvmlErrorString(nvml_result));
+        gpu_available = false;
+    } else {
+        nvml_result = nvmlDeviceGetCount(&device_count);
+        if (nvml_result != NVML_SUCCESS) {
+            result.gpu_error_msg = "Failed to get GPU count: " + std::string(nvmlErrorString(nvml_result));
+            gpu_available = false;
+            nvmlShutdown();
+        }
+    }
+
+    if (gpu_available && device_count > 0) {
+        result.gpu_stats.resize(device_count);
+        gpu_samples.resize(device_count);
+        max_gpu_memories.resize(device_count, 0);
+        gpu_process_founds.resize(device_count, false);
+        for (unsigned int i = 0; i < device_count; ++i) {
+            nvmlDevice_t device;
+            if (nvmlDeviceGetHandleByIndex(i, &device) == NVML_SUCCESS) {
+                char name[NVML_DEVICE_NAME_BUFFER_SIZE];
+                if (nvmlDeviceGetName(device, name, NVML_DEVICE_NAME_BUFFER_SIZE) == NVML_SUCCESS) {
+                    result.gpu_stats[i].name = name;
+                } else {
+                    result.gpu_stats[i].name = "Unknown";
+                }
+
+                // Get GPU architecture
+                int major, minor;
+                if (nvmlDeviceGetCudaComputeCapability(device, &major, &minor) == NVML_SUCCESS) {
+                    if (major == 8 && minor == 0) result.gpu_stats[i].architecture = "Ampere";
+                    else if (major == 8 && minor == 9) result.gpu_stats[i].architecture = "Ada Lovelace";
+                    else if (major == 7 && minor == 5) result.gpu_stats[i].architecture = "Turing";
+                    else if (major == 7 && minor == 0) result.gpu_stats[i].architecture = "Volta";
+                    else if (major == 6) result.gpu_stats[i].architecture = "Pascal";
+                    else result.gpu_stats[i].architecture = "Unknown";
+                } else {
+                    result.gpu_stats[i].architecture = "Unknown";
+                }
+
+                // Get total VRAM
+                nvmlMemory_t memory;
+                if (nvmlDeviceGetMemoryInfo(device, &memory) == NVML_SUCCESS) {
+                    result.gpu_stats[i].total_vram_mb = memory.total / (1024.0 * 1024.0);
+                }
+            }
+        }
+    } else {
+        result.gpu_error_msg = gpu_available ? "No GPUs found" : result.gpu_error_msg;
+    }
+
+    // Start GPU monitoring thread if GPUs are available
+    std::thread gpu_monitor_thread;
+    if (gpu_available && device_count > 0) {
+        gpu_monitor_thread = std::thread(background_monitor_pid, root_pid, interval_sec,
+                                        std::ref(should_stop), std::ref(gpu_samples),
+                                        std::ref(max_gpu_memories), std::ref(gpu_process_founds),
+                                        device_count);
+    }
     
     ProcessInfo prev_info;
     long prev_system_time = 0;
@@ -253,9 +322,13 @@ CombinedStats combined_monitor_process_tree(pid_t root_pid, unsigned int gpu_ind
         next_sample_time += interval_duration;
     }
     
+    // Stop GPU monitoring
     should_stop.store(true);
-    gpu_monitor_thread.join();
+    if (gpu_available && device_count > 0) {
+        gpu_monitor_thread.join();
+    }
     
+    // Process CPU stats
     result.cpu_stats.sample_count = ram_samples.size();
     if (!ram_samples.empty()) {
         result.cpu_stats.ram_max = *std::max_element(ram_samples.begin(), ram_samples.end());
@@ -267,25 +340,30 @@ CombinedStats combined_monitor_process_tree(pid_t root_pid, unsigned int gpu_ind
         result.cpu_stats.cpu_avg = std::accumulate(cpu_samples.begin(), cpu_samples.end(), 0.0) / cpu_samples.size();
     }
     
-    result.gpu_stats.method_used = "Combined Monitoring";
-    result.gpu_stats.monitored_pid = root_pid;
-    result.gpu_stats.memory_used = max_gpu_memory.load();
-    result.gpu_stats.process_has_memory = result.gpu_stats.memory_used > 0;
-    result.gpu_stats.process_found = gpu_process_found.load();
-    result.gpu_stats.execution_time_seconds = std::chrono::duration<double>(
+    // Process GPU stats
+    if (gpu_available && device_count > 0) {
+        for (unsigned int i = 0; i < device_count; ++i) {
+            result.gpu_stats[i].memory_used = max_gpu_memories[i];
+            result.gpu_stats[i].process_has_memory = result.gpu_stats[i].memory_used > 0;
+            result.gpu_stats[i].process_found = gpu_process_founds[i];
+            if (!gpu_samples[i].empty()) {
+                result.gpu_stats[i].gpu_util_max = static_cast<unsigned int>(*std::max_element(gpu_samples[i].begin(), gpu_samples[i].end()));
+                result.gpu_stats[i].gpu_util_mean = std::accumulate(gpu_samples[i].begin(), gpu_samples[i].end(), 0.0) / gpu_samples[i].size();
+            }
+        }
+    }
+    
+    result.execution_time_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - start_time).count();
     
-    if (!gpu_samples.empty()) {
-        result.gpu_stats.utilization_samples = gpu_samples;
-        result.gpu_stats.gpu_util_max = static_cast<unsigned int>(*std::max_element(gpu_samples.begin(), gpu_samples.end()));
-        result.gpu_stats.gpu_util_mean = std::accumulate(gpu_samples.begin(), gpu_samples.end(), 0.0) / gpu_samples.size();
+    if (!gpu_available) {
+        result.gpu_error_msg = "No GPU support available or NVML initialization failed";
     }
     
     return result;
 }
 
-py::dict combined_resource_monitor(py::function py_func, unsigned int gpu_index = 0,
-                                 double timeout = 10.0, double interval = 0.1) {
+py::dict combined_resource_monitor(py::function py_func, double timeout = 10.0, double interval = 0.1) {
     if (interval <= 0) {
         throw std::invalid_argument("Interval must be positive");
     }
@@ -307,7 +385,7 @@ py::dict combined_resource_monitor(py::function py_func, unsigned int gpu_index 
         }
     }
     
-    CombinedStats stats = combined_monitor_process_tree(pid, gpu_index, interval, timeout);
+    CombinedStats stats = combined_monitor_process_tree(pid, interval, timeout);
     
     int final_status;
     pid_t cleanup_result = waitpid(pid, &final_status, 0);
@@ -326,24 +404,27 @@ py::dict combined_resource_monitor(py::function py_func, unsigned int gpu_index 
     result["max_process_count"] = stats.cpu_stats.max_process_count;
     result["num_cores"] = stats.cpu_stats.num_cores;
     result["cpu_type"] = stats.cpu_stats.cpu_type;
-    result["architecture"] = stats.cpu_stats.architecture;
+    result["cpu_architecture"] = stats.cpu_stats.cpu_architecture;
     result["total_ram_mb"] = stats.cpu_stats.total_ram_mb;
     
-    result["gpu_util_mean"] = stats.gpu_stats.gpu_util_mean;
-    result["gpu_util_max"] = stats.gpu_stats.gpu_util_max;
-    result["gpu_process_found"] = stats.gpu_stats.process_found;
-    result["gpu_process_has_memory"] = stats.gpu_stats.process_has_memory;
-    result["gpu_memory_used_mb"] = stats.gpu_stats.memory_used / (1024 * 1024);
-    result["gpu_error_msg"] = stats.gpu_stats.error_msg;
-    result["gpu_method_used"] = stats.gpu_stats.method_used;
-    result["gpu_num_samples"] = static_cast<int>(stats.gpu_stats.utilization_samples.size());
-    result["gpu_execution_time_seconds"] = stats.gpu_stats.execution_time_seconds;
-    
-    py::list gpu_samples_list;
-    for (auto sample : stats.gpu_stats.utilization_samples) {
-        gpu_samples_list.append(sample);
+    py::list gpu_stats_list;
+    for (const auto& gpu : stats.gpu_stats) {
+        py::dict gpu_dict;
+        gpu_dict["name"] = gpu.name;
+        gpu_dict["architecture"] = gpu.architecture;
+        gpu_dict["total_vram_mb"] = gpu.total_vram_mb;
+        gpu_dict["gpu_util_mean"] = gpu.gpu_util_mean;
+        gpu_dict["gpu_util_max"] = gpu.gpu_util_max;
+        gpu_dict["process_found"] = gpu.process_found;
+        gpu_dict["process_has_memory"] = gpu.process_has_memory;
+        gpu_dict["memory_used_mb"] = gpu.memory_used / (1024.0 * 1024.0);
+        gpu_stats_list.append(gpu_dict);
     }
-    result["gpu_samples"] = gpu_samples_list;
+    result["gpu_stats"] = gpu_stats_list;
+    
+    result["execution_time_seconds"] = stats.execution_time_seconds;
+    result["execution_start_time"] = stats.execution_start_time;
+    result["gpu_error_msg"] = stats.gpu_error_msg;
     
     return result;
 }
@@ -668,7 +749,6 @@ PYBIND11_MODULE(combined_procstats, m) {
     
     m.def("combined_resource_monitor", &combined_resource_monitor,
           py::arg("target"),
-          py::arg("gpu_index") = 0,
           py::arg("timeout") = 10.0,
           py::arg("interval") = 0.1,
           "Monitor CPU, RAM, and GPU usage including all child processes");
