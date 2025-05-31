@@ -1,25 +1,38 @@
+import os
+
 import pybind11
+from pybind11 import get_cmake_dir
+from pybind11.setup_helpers import Pybind11Extension, build_ext
 from setuptools import Extension, setup
 
+# Define the extension module
 ext_modules = [
-    Extension(
-        name="procstats_pid",
-        sources=["monitor.cpp"],
+    Pybind11Extension(
+        "procstats_pid",
+        [
+            "monitor.cpp",  # Your C++ file
+        ],
         include_dirs=[
+            # Path to pybind11 headers
             pybind11.get_include(),
-            "/usr/local/cuda-12.6/targets/x86_64-linux/include",  # <- your nvml.h path
+            # CUDA/NVML headers - adjust path as needed
+            "/usr/local/cuda/include",
+            "/usr/include/nvidia/gdk",  # Alternative NVML location
         ],
+        libraries=["nvidia-ml"],  # Link against NVML
         library_dirs=[
-            "/usr/lib/x86_64-linux-gnu",  # <- your real libnvidia-ml.so
+            "/usr/local/cuda/lib64",
+            "/usr/lib/x86_64-linux-gnu",  # Common location for libnvidia-ml.so
         ],
-        libraries=["nvidia-ml"],
-        language="c++",
-        extra_compile_args=["-std=c++17", "-O3", "-Wall"],
-    )
+        cxx_std=11,
+        define_macros=[("VERSION_INFO", '"dev"')],
+    ),
 ]
 
 setup(
     name="procstats_pid",
-    version="0.1",
     ext_modules=ext_modules,
+    cmdclass={"build_ext": build_ext},
+    zip_safe=False,
+    python_requires=">=3.6",
 )
