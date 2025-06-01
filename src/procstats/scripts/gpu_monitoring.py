@@ -180,14 +180,16 @@ def heavy_gpu_task():
     print("PID:", os.getpid())
     try:
         a = torch.randn(5000, 5000, device="cuda:1")
-        for _ in range(1000):
+        for _ in range(3000):
             b = torch.matmul(a, a.T)
     except RuntimeError as e:
         print(f"GPU task failed: {e}")
 
 
 if __name__ == "__main__":
-    result = run_and_monitor_gpu_on_function(
-        target=heavy_gpu_task, gpu_index=1, interval=0.01
-    )
-    print("GPU Monitoring Result:", result)
+    # result = run_and_monitor_gpu_on_function(
+    #     target=heavy_gpu_task, gpu_index=1, interval=0.01
+    # )
+    # print("GPU Monitoring Result:", result)
+
+    heavy_gpu_task()
