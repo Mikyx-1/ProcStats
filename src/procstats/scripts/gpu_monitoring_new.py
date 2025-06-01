@@ -45,45 +45,37 @@ class GPUMonitor:
             except NVMLError:
                 pass
 
-    def _detect_nvidia_architecture(self, gpu_name: str) -> str:
-        """Detect NVIDIA GPU architecture based on GPU name"""
-        gpu_name_lower = gpu_name.lower()
-        if any(
-            x in gpu_name_lower
-            for x in ["rtx 4090", "rtx 4080", "rtx 4070", "rtx 4060"]
-        ):
-            return "Ada Lovelace"
-        if any(
-            x in gpu_name_lower
-            for x in [
-                "rtx 3090",
-                "rtx 3080",
-                "rtx 3070",
-                "rtx 3060",
-                "a100",
-                "a40",
-                "a30",
-                "a10",
-            ]
-        ):
-            return "Ampere"
-        if any(
-            x in gpu_name_lower
-            for x in ["rtx 2080", "rtx 2070", "rtx 2060", "gtx 1660", "gtx 1650"]
-        ):
-            return "Turing"
-        if any(
-            x in gpu_name_lower
-            for x in ["gtx 1080", "gtx 1070", "gtx 1060", "gtx 1050", "p100", "p40"]
-        ):
-            return "Pascal"
-        if any(
-            x in gpu_name_lower for x in ["gtx 980", "gtx 970", "gtx 960", "gtx 950"]
-        ):
-            return "Maxwell"
-        if any(x in gpu_name_lower for x in ["gtx 780", "gtx 770", "gtx 760"]):
-            return "Kepler"
-        return "Unknown"
+    def _detect_nvidia_architecture(self, compute_capability: str) -> str:
+        """
+        Detect NVIDIA GPU architecture based on compute capability.
+        Knowledge till 1st June 2025.
+        """
+        compute_capability_arch_map = {
+            "2.0": "Fermi",
+            "2.1": "Fermi",
+            "3.0": "Kepler",
+            "3.2": "Kepler",
+            "3.5": "Kepler",
+            "3.7": "Kepler",
+            "5.0": "Maxwell",
+            "5.2": "Maxwell",
+            "5.3": "Maxwell",
+            "6.0": "Pascal",
+            "6.1": "Pascal",
+            "6.2": "Pascal",
+            "7.0": "Volta",
+            "7.2": "Xavier",
+            "7.5": "Turing",
+            "8.0": "Ampere",
+            "8.6": "Ampere",
+            "8.9": "Ada Lovelace",
+            "9.0": "Hopper",
+            "9.1": "Hopper",
+            "10.0": "Blackwell",
+            "10.1": "Blackwell",
+            "12.0": "Rubin",
+        }
+        return compute_capability_arch_map.get(compute_capability, "Unknown")
 
     def get_information(self) -> dict:
         """
@@ -119,7 +111,7 @@ class GPUMonitor:
                     total_vram = mem_info.total // (1024 * 1024)  # Convert to MB
                     cc_major, cc_minor = nvmlDeviceGetCudaComputeCapability(handle)
                     compute_capability = f"{cc_major}.{cc_minor}"
-                    architecture = self._detect_nvidia_architecture(name)
+                    architecture = self._detect_nvidia_architecture(compute_capability)
 
                     gpu_info = {
                         "index": i,
