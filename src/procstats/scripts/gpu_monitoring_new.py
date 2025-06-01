@@ -1,5 +1,7 @@
+import datetime
 import logging
 import multiprocessing as mp
+import statistics
 import time
 from typing import Any, Callable, Dict, Tuple
 
@@ -138,8 +140,139 @@ class GPUMonitor:
 
         return result
 
+    @staticmethod
+    def sample_gpu_utilisation(handle, pid: int) -> int:
+        try:
+            proc_utils = nvmlDeviceGetProcessUtilization(handle, 1000)
+            return next((p.smUtil for p in proc_utils if p.pid == pid), 0)
+        except NVMLError as e:
+            return 0  # Return 0 for all NVML errors, including NotFound
+
+    @staticmethod
+    def sample_gpu_vram(handle, pid: int) -> int:
+        try:
+            processes = nvmlDeviceGetComputeRunningProcesses(handle)
+            return (
+                next((p.usedGpuMemory for p in processes if p.pid == pid), 0) / 1024**2
+            )  # MB
+        except NVMLError:
+            return 0
+
+    def monitor_gpu_utilisation_by_pid(
+        self, pid: int, interval: float = 1.0, timeout: float = float("inf")
+    ) -> dict:
+        """
+        Return process's gpu usage.
+        Return a dict of GPU Max util, GPU Mean Util, VRAM Max, VRAM mean for each available GPU, start time, duration,
+        exit_code (True if Ctrl+C), and timeout (True if timeout reached).
+        """
+        result = {
+            "gpu_max_util": {},
+            "gpu_mean_util": {},
+            "vram_max_mb": {},
+            "vram_mean_mb": {},
+            "start_time": None,
+            "duration": None,
+            "exit_code": False,
+            "timeout": False,
+        }
+
+        if not PYNVML_AVAILABLE or not self.nvidia_initialized:
+            self.logger.warning("NVIDIA monitoring unavailable or not initialized")
+            result["start_time"] = time.time()
+            result["duration"] = 0.0
+            return result
+
+        if not psutil.pid_exists(pid):
+            self.logger.error(f"Process with PID {pid} does not exist")
+            result["start_time"] = time.time()
+            result["duration"] = 0.0
+            return result
+
+        try:
+            proc = psutil.Process(pid)
+            gpu_count = nvmlDeviceGetCount()
+            self.logger.info(
+                f"Starting GPU monitoring for PID {pid} on {gpu_count} GPU(s) with interval {interval}s and timeout {timeout}s"
+            )
+
+            # Initialize storage for samples
+            gpu_util_samples = {i: [] for i in range(gpu_count)}
+            vram_samples = {i: [] for i in range(gpu_count)}
+            start_time = time.time()
+
+            try:
+                while True:
+                    # Check if process is still running
+                    if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                        self.logger.info(
+                            f"Process with PID {pid} has terminated or is a zombie"
+                        )
+                        break
+
+                    # Check for timeout
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time >= timeout:
+                        self.logger.info(f"Timeout of {timeout}s reached for PID {pid}")
+                        result["timeout"] = True
+                        break
+
+                    for i in range(gpu_count):
+                        try:
+                            handle = nvmlDeviceGetHandleByIndex(i)
+                            gpu_util = self.sample_gpu_utilisation(handle, pid)
+                            vram_usage = self.sample_gpu_vram(handle, pid)
+                            gpu_util_samples[i].append(gpu_util)
+                            vram_samples[i].append(vram_usage)
+                            # self.logger.info(
+                            #     f"PID {pid} on GPU {i}: GPU Util {gpu_util}% | VRAM {vram_usage:.2f} MB"
+                            # )
+                        except NVMLError as e:
+                            self.logger.error(f"Error sampling GPU {i}: {e}")
+                            gpu_util_samples[i].append(0)
+                            vram_samples[i].append(0.0)
+
+                    time.sleep(interval)
+
+            except KeyboardInterrupt:
+                self.logger.info(
+                    f"Monitoring stopped for PID {pid} due to user interrupt"
+                )
+                result["exit_code"] = True
+
+            finally:
+                duration = time.time() - start_time
+                # Compute max and mean for each GPU
+                for i in range(gpu_count):
+                    util_samples = gpu_util_samples[i]
+                    vram_samples_list = vram_samples[i]
+                    result["gpu_max_util"][i] = max(util_samples) if util_samples else 0
+                    result["gpu_mean_util"][i] = (
+                        statistics.mean(util_samples) if util_samples else 0.0
+                    )
+                    result["vram_max_mb"][i] = (
+                        max(vram_samples_list) if vram_samples_list else 0.0
+                    )
+                    result["vram_mean_mb"][i] = (
+                        statistics.mean(vram_samples_list) if vram_samples_list else 0.0
+                    )
+
+                result["start_time"] = start_time
+                result["duration"] = duration
+                return result
+
+        except NVMLError as e:
+            self.logger.error(f"Error accessing GPUs: {e}")
+            result["start_time"] = time.time()
+            result["duration"] = 0.0
+            return result
+
 
 if __name__ == "__main__":
     monitor = GPUMonitor()
     info = monitor.get_information()
     print(f"info: {info}")
+
+    # Example: Monitor GPU usage for a process (replace 1234 with actual PID)
+    result = monitor.monitor_gpu_utilisation_by_pid(10402, 0.01, 10.0)  # 60s timeout
+    print(f"Monitoring result: {result}")
