@@ -1,84 +1,34 @@
-from setuptools import setup
-from pybind11.setup_helpers import Pybind11Extension, build_ext
-
-ext_modules = [
-    Pybind11Extension(
-        "procstats.combined_procstats",
-        ["src/procstats/cpp/combined_monitoring.cpp"],
-        include_dirs=[
-            "/usr/local/cuda/include",
-            "/usr/include/nvidia/gdk",
-            "/usr/include",
-            "/usr/include/x86_64-linux-gnu",
-        ],
-        libraries=["nvidia-ml"],
-        library_dirs=[
-            "/usr/lib/x86_64-linux-gnu",
-            "/usr/local/cuda/lib64",
-            "/usr/lib/nvidia-535",
-        ],
-        cxx_std=17,
-        define_macros=[("VERSION_INFO", '"0.1.0"')],
-        extra_compile_args=['-O3'],
-    ),
-    Pybind11Extension(
-        "procstats.cpu_ram_monitoring",
-        ["src/procstats/cpp/cpu_ram_monitoring.cpp"],
-        include_dirs=[
-            "/usr/include",
-            "/usr/include/x86_64-linux-gnu",
-        ],
-        cxx_std=17,
-        define_macros=[("VERSION_INFO", '"0.1.0"')],
-        extra_compile_args=['-O3'],
-    ),
-    Pybind11Extension(
-        "procstats.gpu_monitoring",
-        ["src/procstats/cpp/gpu_monitoring.cpp"],
-        include_dirs=[
-            "/usr/local/cuda/include",
-            "/usr/include/nvidia/gdk",
-            "/usr/include",
-            "/usr/include/x86_64-linux-gnu",
-        ],
-        libraries=["nvidia-ml"],
-        library_dirs=[
-            "/usr/lib/x86_64-linux-gnu",
-            "/usr/local/cuda/lib64",
-            "/usr/lib/nvidia-535",
-        ],
-        cxx_std=17,
-        define_macros=[("VERSION_INFO", '"0.1.0"')],
-        extra_compile_args=['-O3'],
-    ),
-]
+from setuptools import find_packages, setup
 
 setup(
     name="procstats",
     version="0.1.0",
-    description="Combined CPU, RAM, and GPU resource monitoring with child process tracking",
+    description="A Python package for monitoring CPU, RAM, and GPU resources with adaptive sampling",
+    long_description=open("README.md", encoding="utf-8").read(),
+    long_description_content_type="text/markdown",
     author="Le Hoang Viet",
-    author_email="your.email@example.com",  # Update with your email
-    url="https://github.com/yourusername/procstats",  # Update with your repo
-    packages=["procstats", "procstats.scripts", "procstats.tests"],
+    author_email="lehoangviet2k@gmail.com",
+    url="https://github.com/Mikyx-1/ProcStats",
+    packages=find_packages(where="src"),
     package_dir={"": "src"},
-    ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext},
     install_requires=[
-        "pybind11>=2.6.0",
-        "cloudpickle",
+        "psutil>=5.9.0",
     ],
-    zip_safe=False,
-    python_requires=">=3.6",
+    extras_require={
+        "gpu": [
+            "pynvml>=11.0.0",  # Optional for NVIDIA GPU monitoring
+        ],
+        "test": ["pytest>=7.0.0"],
+    },
+    python_requires=">=3.8",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.6",
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
-        "Operating System :: POSIX :: Linux",
-        "License :: OSI Approved :: MIT License",  # Adjust if LICENSE differs
+        "Programming Language :: Python :: 3.12",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
     ],
 )

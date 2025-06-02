@@ -1,3 +1,3 @@
-from .combined_procstats import combined_resource_monitor
+from .scripts.full_monitoring import monitor_function_resources
 
 __version__ = "0.1.0"

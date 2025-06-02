@@ -4,7 +4,6 @@ import time
 from typing import Any, Callable, Dict, Tuple
 
 import psutil
-
 from cpu_ram_monitoring import (AdaptiveMonitor,
                                 monitor_cpu_and_ram_by_pid_advanced)
 from gpu_monitoring import GPUMonitor
@@ -199,22 +198,5 @@ def monitor_function_resources(
     )
 
 
-def heavy_gpu_task():
-    import os
-
-    import torch
-
-    print("PID:", os.getpid())
-    try:
-        a = torch.randn(5000, 5000, device="cuda:1")
-        for _ in range(3000):
-            b = torch.matmul(a, a.T)
-    except RuntimeError as e:
-        print(f"GPU task failed: {e}")
-
-
 if __name__ == "__main__":
-    result = monitor_function_resources(
-        heavy_gpu_task, base_interval=0.05, timeout=10.0
-    )
-    print(result)
+    pass
