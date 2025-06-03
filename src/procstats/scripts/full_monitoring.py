@@ -1,9 +1,12 @@
 import logging
 import multiprocessing as mp
+import queue
+import threading
 import time
 from typing import Any, Callable, Dict, Tuple
 
 import psutil
+
 from cpu_ram_monitoring import (AdaptiveMonitor,
                                 monitor_cpu_and_ram_by_pid_advanced)
 from gpu_monitoring import GPUMonitor
@@ -24,27 +27,36 @@ class ComprehensiveMonitor:
         self.gpu_monitor = GPUMonitor()
         self.system_info = SystemInfo()
 
-    def monitor_resources(self, result_container: list, timeout: float = 12.0):
+    def monitor_resources(self, result_container: queue.Queue, timeout: float = 12.0):
         """Monitor CPU, RAM, and GPU resources for the given PID."""
         start_time = time.time()
-        cpu_ram_result_container = mp.Manager().list()
-        gpu_result_container = mp.Manager().list()
+        cpu_ram_result_container = queue.Queue()
+        gpu_result_container = queue.Queue()
 
-        # Start CPU/RAM monitoring process
-        cpu_ram_proc = mp.Process(
+        # Wrapper to adapt Queue to list-like interface for monitor_cpu_and_ram_by_pid_advanced
+        class QueueWrapper:
+            def __init__(self, q):
+                self.q = q
+
+            def append(self, item):
+                self.q.put(item)
+
+        # Start CPU/RAM monitoring thread
+        cpu_ram_queue_wrapper = QueueWrapper(cpu_ram_result_container)
+        cpu_ram_thread = threading.Thread(
             target=monitor_cpu_and_ram_by_pid_advanced,
-            args=(self.pid, self.base_interval, cpu_ram_result_container),
+            args=(self.pid, self.base_interval, cpu_ram_queue_wrapper),
         )
-        cpu_ram_proc.start()
+        cpu_ram_thread.start()
 
-        # Start GPU monitoring in a separate process if available
-        gpu_proc = None
+        # Start GPU monitoring in a separate thread if available
+        gpu_thread = None
         if self.gpu_monitor.nvidia_initialized:
-            gpu_proc = mp.Process(
+            gpu_thread = threading.Thread(
                 target=self._monitor_gpu_process,
                 args=(self.pid, self.base_interval, timeout, gpu_result_container),
             )
-            gpu_proc.start()
+            gpu_thread.start()
 
         # Wait for the target process to complete or timeout
         try:
@@ -53,10 +65,10 @@ class ComprehensiveMonitor:
         except (psutil.NoSuchProcess, psutil.TimeoutExpired):
             self.logger.info(f"Process {self.pid} either terminated or timed out")
 
-        # Ensure monitoring processes complete
-        cpu_ram_proc.join()
-        if gpu_proc:
-            gpu_proc.join()
+        # Ensure monitoring threads complete
+        cpu_ram_thread.join()
+        if gpu_thread:
+            gpu_thread.join()
 
         # Combine results
         result = {
@@ -66,7 +78,7 @@ class ComprehensiveMonitor:
             "ram_max": 0,
             "ram_avg": 0,
             "ram_p95": 0,
-            "num_cores": mp.cpu_count(),
+            "num_cores": psutil.cpu_count(),
             "measurements_taken": 0,
             "data_quality_score": 0,
             "gpu_max_util": {},
@@ -80,8 +92,8 @@ class ComprehensiveMonitor:
         }
 
         # Update with CPU/RAM results
-        if cpu_ram_result_container:
-            cpu_ram_data = cpu_ram_result_container[0]
+        if not cpu_ram_result_container.empty():
+            cpu_ram_data = cpu_ram_result_container.get()
             result.update(
                 {
                     "cpu_max": cpu_ram_data["cpu_max"],
@@ -97,8 +109,8 @@ class ComprehensiveMonitor:
             )
 
         # Update with GPU results
-        if gpu_result_container:
-            gpu_result = gpu_result_container[0]
+        if not gpu_result_container.empty():
+            gpu_result = gpu_result_container.get()
             result.update(
                 {
                     "gpu_max_util": gpu_result["gpu_max_util"],
@@ -111,19 +123,19 @@ class ComprehensiveMonitor:
                 }
             )
 
-        result_container.append(result)
+        result_container.put(result)
 
     def _monitor_gpu_process(
-        self, pid: int, interval: float, timeout: float, result_container: list
+        self, pid: int, interval: float, timeout: float, result_container: queue.Queue
     ):
-        """Run GPU monitoring in a separate process to ensure proper NVIDIA ML initialization."""
+        """Run GPU monitoring in a separate thread to ensure proper NVIDIA ML initialization."""
         try:
-            gpu_monitor = GPUMonitor()  # Reinitialize in new process
+            gpu_monitor = GPUMonitor()  # Reinitialize in new thread
             result = gpu_monitor.monitor_gpu_utilisation_by_pid(pid, interval, timeout)
-            result_container.append(result)
+            result_container.put(result)
         except Exception as e:
             self.logger.error(f"GPU monitoring failed: {e}")
-            result_container.append(
+            result_container.put(
                 {
                     "gpu_max_util": {},
                     "gpu_mean_util": {},
@@ -148,20 +160,18 @@ def monitor_function_resources(
     if kwargs is None:
         kwargs = {}
 
-    mp.set_start_method("spawn", force=True)
-    manager = mp.Manager()
-    result_container = manager.list()
+    result_container = queue.Queue()
 
-    # Start the target function process
+    # Start the target function process (kept as process per request)
     process = mp.Process(target=target, args=args, kwargs=kwargs)
     process.start()
 
-    # Start comprehensive monitoring
+    # Start comprehensive monitoring in a thread
     monitor = ComprehensiveMonitor(process.pid, base_interval)
-    monitor_proc = mp.Process(
+    monitor_thread = threading.Thread(
         target=monitor.monitor_resources, args=(result_container, timeout)
     )
-    monitor_proc.start()
+    monitor_thread.start()
 
     # Wait for the target process to complete or timeout
     process.join(timeout=timeout)
@@ -171,11 +181,11 @@ def monitor_function_resources(
         monitor.logger.info(f"Target process {process.pid} terminated due to timeout")
 
     # Wait for monitoring to complete
-    monitor_proc.join()
+    monitor_thread.join()
 
     return (
-        result_container[0]
-        if result_container
+        result_container.get()
+        if not result_container.empty()
         else {
             "cpu_max": 0,
             "cpu_avg": 0,
@@ -183,7 +193,7 @@ def monitor_function_resources(
             "ram_max": 0,
             "ram_avg": 0,
             "ram_p95": 0,
-            "num_cores": mp.cpu_count(),
+            "num_cores": psutil.cpu_count(),
             "measurements_taken": 0,
             "data_quality_score": 0,
             "gpu_max_util": {},
