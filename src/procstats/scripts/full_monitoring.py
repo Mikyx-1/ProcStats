@@ -1,10 +1,15 @@
 import logging
 import multiprocessing as mp
+import os
 import queue
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Dict, Tuple
 
+import dill
 import psutil
 
 from cpu_ram_monitoring import (AdaptiveMonitor,
@@ -149,6 +154,31 @@ class ComprehensiveMonitor:
             )
 
 
+def _run_serialized_function(serialized_path: str, output_path: str):
+    """
+    This helper is just the Python command string passed to subprocess,
+    it loads serialized function, runs it, writes result to output_path.
+    """
+
+    code = f"""
+import dill
+import sys
+import traceback
+
+try:
+    with open({serialized_path!r}, 'rb') as f:
+        func, args, kwargs = dill.load(f)
+    result = func(*args, **kwargs)
+    with open({output_path!r}, 'wb') as out_f:
+        dill.dump({{'result': result, 'error': None}}, out_f)
+except Exception as e:
+    with open({output_path!r}, 'wb') as out_f:
+        dill.dump({{'result': None, 'error': traceback.format_exc()}}, out_f)
+    sys.exit(1)
+"""
+    return code
+
+
 def monitor_function_resources(
     target: Callable[..., Any],
     args: Tuple = (),
@@ -156,56 +186,88 @@ def monitor_function_resources(
     base_interval: float = 0.05,
     timeout: float = 12.0,
 ) -> Dict[str, Any]:
-    """Monitor resources used by a target function."""
     if kwargs is None:
         kwargs = {}
 
     result_container = queue.Queue()
 
-    # Start the target function process (kept as process per request)
-    process = mp.Process(target=target, args=args, kwargs=kwargs)
-    process.start()
+    with tempfile.TemporaryDirectory() as tempdir:
+        serialized_path = os.path.join(tempdir, "func.dill")
+        output_path = os.path.join(tempdir, "output.dill")
 
-    # Start comprehensive monitoring in a thread
-    monitor = ComprehensiveMonitor(process.pid, base_interval)
-    monitor_thread = threading.Thread(
-        target=monitor.monitor_resources, args=(result_container, timeout)
-    )
-    monitor_thread.start()
+        # Serialize the function, args, kwargs together
+        with open(serialized_path, "wb") as f:
+            dill.dump((target, args, kwargs), f)
 
-    # Wait for the target process to complete or timeout
-    process.join(timeout=timeout)
-    if process.is_alive():
-        process.terminate()
-        process.join()
-        monitor.logger.info(f"Target process {process.pid} terminated due to timeout")
+        # Create Python code command to run the serialized function
+        python_code = _run_serialized_function(serialized_path, output_path)
 
-    # Wait for monitoring to complete
-    monitor_thread.join()
+        # Launch subprocess running python -c 'python_code'
+        process = subprocess.Popen(
+            [sys.executable, "-c", python_code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
-    return (
-        result_container.get()
-        if not result_container.empty()
-        else {
-            "cpu_max": 0,
-            "cpu_avg": 0,
-            "cpu_p95": 0,
-            "ram_max": 0,
-            "ram_avg": 0,
-            "ram_p95": 0,
-            "num_cores": psutil.cpu_count(),
-            "measurements_taken": 0,
-            "data_quality_score": 0,
-            "gpu_max_util": {},
-            "gpu_mean_util": {},
-            "vram_max_mb": {},
-            "vram_mean_mb": {},
-            "start_time": time.time(),
-            "duration": 0.0,
-            "timeout_reached": True,
-            "system_info": SystemInfo().get_all_info(),
-        }
-    )
+        # Start monitoring the subprocess pid
+        monitor = ComprehensiveMonitor(process.pid, base_interval)
+        monitor_thread = threading.Thread(
+            target=monitor.monitor_resources, args=(result_container, timeout)
+        )
+        monitor_thread.start()
+
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            monitor.logger.info(f"Subprocess {process.pid} killed due to timeout")
+
+        # Wait for monitoring thread to finish
+        monitor_thread.join()
+
+        # Load function execution result from output file (if exists)
+        func_result = None
+        func_error = None
+        if os.path.exists(output_path):
+            try:
+                with open(output_path, "rb") as f:
+                    res = dill.load(f)
+                    func_result = res.get("result")
+                    func_error = res.get("error")
+            except Exception as e:
+                monitor.logger.error(f"Failed to load function output: {e}")
+
+        # Get monitoring result
+        monitor_result = (
+            result_container.get()
+            if not result_container.empty()
+            else {
+                "cpu_max": 0,
+                "cpu_avg": 0,
+                "cpu_p95": 0,
+                "ram_max": 0,
+                "ram_avg": 0,
+                "ram_p95": 0,
+                "num_cores": 0,
+                "measurements_taken": 0,
+                "data_quality_score": 0,
+                "gpu_max_util": {},
+                "gpu_mean_util": {},
+                "vram_max_mb": {},
+                "vram_mean_mb": {},
+                "start_time": time.time(),
+                "duration": 0.0,
+                "timeout_reached": True,
+                "system_info": SystemInfo().get_all_info(),
+            }
+        )
+
+        # Attach function result or error to monitoring info if needed
+        monitor_result["function_result"] = func_result
+        monitor_result["function_error"] = func_error
+
+        return monitor_result
 
 
 if __name__ == "__main__":
