@@ -161,22 +161,60 @@ def _run_serialized_function(serialized_path: str, output_path: str):
     """
 
     code = f"""
-import dill
-import sys
-import traceback
+            import dill
+            import sys
+            import traceback
 
-try:
-    with open({serialized_path!r}, 'rb') as f:
-        func, args, kwargs = dill.load(f)
-    result = func(*args, **kwargs)
-    with open({output_path!r}, 'wb') as out_f:
-        dill.dump({{'result': result, 'error': None}}, out_f)
-except Exception as e:
-    with open({output_path!r}, 'wb') as out_f:
-        dill.dump({{'result': None, 'error': traceback.format_exc()}}, out_f)
-    sys.exit(1)
-"""
+            try:
+                with open({serialized_path!r}, 'rb') as f:
+                    func, args, kwargs = dill.load(f)
+                result = func(*args, **kwargs)
+                with open({output_path!r}, 'wb') as out_f:
+                    dill.dump({{'result': result, 'error': None}}, out_f)
+            except Exception as e:
+                with open({output_path!r}, 'wb') as out_f:
+                    dill.dump({{'result': None, 'error': traceback.format_exc()}}, out_f)
+                sys.exit(1)
+            """
     return code
+
+
+def _kill_process_tree(pid: int, logger):
+    """Kill a process and all its children recursively."""
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+
+        # Kill children first
+        for child in children:
+            try:
+                logger.info(f"Terminating child process {child.pid}")
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # Kill parent
+        try:
+            logger.info(f"Terminating parent process {parent.pid}")
+            parent.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+        # Wait for graceful termination
+        _, alive = psutil.wait_procs(children + [parent], timeout=3)
+
+        # Force kill any remaining processes
+        for p in alive:
+            try:
+                logger.info(f"Force killing process {p.pid}")
+                p.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+    except psutil.NoSuchProcess:
+        logger.info(f"Process {pid} already terminated")
+    except Exception as e:
+        logger.error(f"Error killing process tree for PID {pid}: {e}")
 
 
 def monitor_function_resources(
@@ -189,6 +227,7 @@ def monitor_function_resources(
     if kwargs is None:
         kwargs = {}
 
+    logger = logging.getLogger(__name__)
     result_container = queue.Queue()
 
     with tempfile.TemporaryDirectory() as tempdir:
@@ -216,12 +255,23 @@ def monitor_function_resources(
         )
         monitor_thread.start()
 
+        timeout_occurred = False
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-            monitor.logger.info(f"Subprocess {process.pid} killed due to timeout")
+            timeout_occurred = True
+            logger.info(f"Timeout reached, killing process tree for PID {process.pid}")
+
+            # Kill the entire process tree
+            _kill_process_tree(process.pid, logger)
+
+            # Get any remaining output
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = b"", b""
+
+            logger.info(f"Process tree for PID {process.pid} terminated due to timeout")
 
         # Wait for monitoring thread to finish
         monitor_thread.join()
@@ -236,7 +286,7 @@ def monitor_function_resources(
                     func_result = res.get("result")
                     func_error = res.get("error")
             except Exception as e:
-                monitor.logger.error(f"Failed to load function output: {e}")
+                logger.error(f"Failed to load function output: {e}")
 
         # Get monitoring result
         monitor_result = (
@@ -263,9 +313,19 @@ def monitor_function_resources(
             }
         )
 
+        # Ensure timeout status is correctly set
+        if timeout_occurred:
+            monitor_result["timeout_reached"] = True
+
         # Attach function result or error to monitoring info if needed
         monitor_result["function_result"] = func_result
         monitor_result["function_error"] = func_error
+        monitor_result["stdout"] = (
+            stdout.decode("utf-8", errors="ignore") if stdout else ""
+        )
+        monitor_result["stderr"] = (
+            stderr.decode("utf-8", errors="ignore") if stderr else ""
+        )
 
         return monitor_result
 

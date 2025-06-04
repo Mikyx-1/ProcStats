@@ -3,7 +3,7 @@ import logging
 import multiprocessing as mp
 import statistics
 import time
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, List, Set, Tuple
 
 import psutil
 
@@ -140,6 +140,25 @@ class GPUMonitor:
 
         return result
 
+    def _get_all_child_pids(self, parent_pid: int) -> Set[int]:
+        """Recursively get all child PIDs of a parent process"""
+        all_pids = set()
+        try:
+            parent = psutil.Process(parent_pid)
+            all_pids.add(parent_pid)
+
+            # Get all descendants recursively
+            for child in parent.children(recursive=True):
+                try:
+                    all_pids.add(child.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+        return all_pids
+
     @staticmethod
     def sample_gpu_utilisation(handle, pid: int) -> int:
         try:
@@ -159,12 +178,16 @@ class GPUMonitor:
             return 0
 
     def monitor_gpu_utilisation_by_pid(
-        self, pid: int, interval: float = 1.0, timeout: float = float("inf")
+        self,
+        pid: int,
+        interval: float = 1.0,
+        timeout: float = float("inf"),
+        include_children: bool = True,
     ) -> dict:
         """
-        Return process's gpu usage.
+        Return process's gpu usage, including child processes if include_children=True.
         Return a dict of GPU Max util, GPU Mean Util, VRAM Max, VRAM mean for each available GPU, start time, duration,
-        exit_code (True if Ctrl+C), and timeout (True if timeout reached).
+        exit_code (True if Ctrl+C), timeout (True if timeout reached), and process_info with per-PID details.
         """
         result = {
             "gpu_max_util": {},
@@ -175,6 +198,8 @@ class GPUMonitor:
             "duration": None,
             "exit_code": False,
             "timeout": False,
+            "process_info": {},  # Per-PID breakdown
+            "monitored_pids": set(),
         }
 
         if not PYNVML_AVAILABLE or not self.nvidia_initialized:
@@ -190,25 +215,38 @@ class GPUMonitor:
             return result
 
         try:
-            proc = psutil.Process(pid)
             gpu_count = nvmlDeviceGetCount()
             self.logger.info(
-                f"Starting GPU monitoring for PID {pid} on {gpu_count} GPU(s) with interval {interval}s and timeout {timeout}s"
+                f"Starting GPU monitoring for PID {pid} (include_children={include_children}) on {gpu_count} GPU(s) with interval {interval}s and timeout {timeout}s"
             )
 
-            # Initialize storage for samples
+            # Initialize storage for samples - aggregated across all PIDs
             gpu_util_samples = {i: [] for i in range(gpu_count)}
             vram_samples = {i: [] for i in range(gpu_count)}
+
+            # Per-PID tracking
+            per_pid_samples = {}
+
             start_time = time.time()
+            monitored_pids = set()
 
             try:
                 while True:
-                    # Check if process is still running
-                    if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                    # Get current PIDs to monitor
+                    if include_children:
+                        current_pids = self._get_all_child_pids(pid)
+                    else:
+                        current_pids = {pid} if psutil.pid_exists(pid) else set()
+
+                    # Check if any processes are still running
+                    if not current_pids:
                         self.logger.info(
-                            f"Process with PID {pid} has terminated or is a zombie"
+                            f"No processes to monitor (original PID: {pid})"
                         )
                         break
+
+                    # Update monitored PIDs set
+                    monitored_pids.update(current_pids)
 
                     # Check for timeout
                     elapsed_time = time.time() - start_time
@@ -217,20 +255,56 @@ class GPUMonitor:
                         result["timeout"] = True
                         break
 
+                    # Sample GPU usage for each GPU and each PID
+                    current_gpu_util = {i: 0 for i in range(gpu_count)}
+                    current_vram_usage = {i: 0.0 for i in range(gpu_count)}
+
+                    for current_pid in current_pids:
+                        # Initialize per-PID tracking if needed
+                        if current_pid not in per_pid_samples:
+                            per_pid_samples[current_pid] = {
+                                "gpu_util": {i: [] for i in range(gpu_count)},
+                                "vram": {i: [] for i in range(gpu_count)},
+                            }
+
+                        for i in range(gpu_count):
+                            try:
+                                handle = nvmlDeviceGetHandleByIndex(i)
+                                gpu_util = self.sample_gpu_utilisation(
+                                    handle, current_pid
+                                )
+                                vram_usage = self.sample_gpu_vram(handle, current_pid)
+
+                                # Store per-PID samples
+                                per_pid_samples[current_pid]["gpu_util"][i].append(
+                                    gpu_util
+                                )
+                                per_pid_samples[current_pid]["vram"][i].append(
+                                    vram_usage
+                                )
+
+                                # Aggregate for overall stats
+                                current_gpu_util[i] += gpu_util
+                                current_vram_usage[i] += vram_usage
+
+                            except NVMLError as e:
+                                self.logger.error(
+                                    f"Error sampling GPU {i} for PID {current_pid}: {e}"
+                                )
+                                per_pid_samples[current_pid]["gpu_util"][i].append(0)
+                                per_pid_samples[current_pid]["vram"][i].append(0.0)
+
+                    # Store aggregated samples
                     for i in range(gpu_count):
-                        try:
-                            handle = nvmlDeviceGetHandleByIndex(i)
-                            gpu_util = self.sample_gpu_utilisation(handle, pid)
-                            vram_usage = self.sample_gpu_vram(handle, pid)
-                            gpu_util_samples[i].append(gpu_util)
-                            vram_samples[i].append(vram_usage)
-                            # self.logger.info(
-                            #     f"PID {pid} on GPU {i}: GPU Util {gpu_util}% | VRAM {vram_usage:.2f} MB"
-                            # )
-                        except NVMLError as e:
-                            self.logger.error(f"Error sampling GPU {i}: {e}")
-                            gpu_util_samples[i].append(0)
-                            vram_samples[i].append(0.0)
+                        gpu_util_samples[i].append(current_gpu_util[i])
+                        vram_samples[i].append(current_vram_usage[i])
+
+                    # Log current status
+                    active_pids = len(current_pids)
+                    if active_pids > 0:
+                        self.logger.debug(
+                            f"Monitoring {active_pids} processes: {sorted(current_pids)}"
+                        )
 
                     time.sleep(interval)
 
@@ -242,7 +316,8 @@ class GPUMonitor:
 
             finally:
                 duration = time.time() - start_time
-                # Compute max and mean for each GPU
+
+                # Compute aggregated max and mean for each GPU
                 for i in range(gpu_count):
                     util_samples = gpu_util_samples[i]
                     vram_samples_list = vram_samples[i]
@@ -257,8 +332,41 @@ class GPUMonitor:
                         statistics.mean(vram_samples_list) if vram_samples_list else 0.0
                     )
 
+                # Compute per-PID statistics
+                for pid_key, samples in per_pid_samples.items():
+                    result["process_info"][pid_key] = {
+                        "gpu_max_util": {},
+                        "gpu_mean_util": {},
+                        "vram_max_mb": {},
+                        "vram_mean_mb": {},
+                    }
+
+                    for i in range(gpu_count):
+                        util_samples = samples["gpu_util"][i]
+                        vram_samples_list = samples["vram"][i]
+
+                        result["process_info"][pid_key]["gpu_max_util"][i] = (
+                            max(util_samples) if util_samples else 0
+                        )
+                        result["process_info"][pid_key]["gpu_mean_util"][i] = (
+                            statistics.mean(util_samples) if util_samples else 0.0
+                        )
+                        result["process_info"][pid_key]["vram_max_mb"][i] = (
+                            max(vram_samples_list) if vram_samples_list else 0.0
+                        )
+                        result["process_info"][pid_key]["vram_mean_mb"][i] = (
+                            statistics.mean(vram_samples_list)
+                            if vram_samples_list
+                            else 0.0
+                        )
+
                 result["start_time"] = start_time
                 result["duration"] = duration
+                result["monitored_pids"] = monitored_pids
+
+                self.logger.info(
+                    f"Monitoring completed. Tracked {len(monitored_pids)} PIDs: {sorted(monitored_pids)}"
+                )
                 return result
 
         except NVMLError as e:
@@ -267,12 +375,68 @@ class GPUMonitor:
             result["duration"] = 0.0
             return result
 
+    def monitor_function_with_multiprocessing(
+        self,
+        target_function: Callable,
+        interval: float = 1.0,
+        timeout: float = float("inf"),
+    ) -> dict:
+        """
+        Monitor a function that may spawn child processes.
+        This is a convenience method that runs the function and monitors all related processes.
+        """
+        import os
+
+        def wrapper():
+            # Get the current PID
+            current_pid = os.getpid()
+            self.logger.info(f"Starting function monitoring for PID {current_pid}")
+
+            # Start monitoring in a separate process
+            monitor_process = mp.Process(
+                target=self._monitor_and_store_results,
+                args=(current_pid, interval, timeout),
+            )
+            monitor_process.start()
+
+            try:
+                # Run the target function
+                target_function()
+            finally:
+                # Stop monitoring
+                monitor_process.terminate()
+                monitor_process.join(timeout=5)
+                if monitor_process.is_alive():
+                    monitor_process.kill()
+
+        # This is a simplified version - for full implementation,
+        # you'd need inter-process communication to get results back
+        self.logger.warning(
+            "monitor_function_with_multiprocessing is a simplified implementation"
+        )
+        wrapper()
+        return {
+            "status": "completed",
+            "note": "Use monitor_gpu_utilisation_by_pid directly for full results",
+        }
+
+    def _monitor_and_store_results(self, pid: int, interval: float, timeout: float):
+        """Helper method for monitoring in separate process"""
+        result = self.monitor_gpu_utilisation_by_pid(
+            pid, interval, timeout, include_children=True
+        )
+        # In a full implementation, you'd store this result somewhere accessible
+        # to the parent process, like a shared memory object or file
+        self.logger.info(f"Monitoring result: {result}")
+
 
 if __name__ == "__main__":
     monitor = GPUMonitor()
     info = monitor.get_information()
     print(f"info: {info}")
 
-    # Example: Monitor GPU usage for a process (replace 1234 with actual PID)
-    result = monitor.monitor_gpu_utilisation_by_pid(10402, 0.01, 10.0)  # 60s timeout
-    print(f"Monitoring result: {result}")
+    # Example: Monitor GPU usage for a process with children
+    result = monitor.monitor_gpu_utilisation_by_pid(
+        24383, 0.01, 10.0, include_children=True
+    )
+    print(result)
