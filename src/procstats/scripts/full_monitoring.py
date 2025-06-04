@@ -31,6 +31,22 @@ class ComprehensiveMonitor:
         self.cpu_monitor = AdaptiveMonitor(pid, base_interval)
         self.gpu_monitor = GPUMonitor()
         self.system_info = SystemInfo()
+        self.max_processes = 0
+
+    def _track_process_count(self):
+        """Track the maximum number of processes in the process tree."""
+        try:
+            parent = psutil.Process(self.pid)
+            children = parent.children(recursive=True)
+            current_count = len(children) + 1  # +1 for parent process
+
+            # Update max processes if current count is higher
+            if current_count > self.max_processes:
+                self.max_processes = current_count
+
+            return current_count
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return 0
 
     def monitor_resources(self, result_container: queue.Queue, timeout: float = 12.0):
         """Monitor CPU, RAM, and GPU resources for the given PID."""
@@ -63,6 +79,14 @@ class ComprehensiveMonitor:
             )
             gpu_thread.start()
 
+        # Start process counting thread
+        process_count_stop_event = threading.Event()
+        process_count_thread = threading.Thread(
+            target=self._monitor_process_count,
+            args=(process_count_stop_event, self.base_interval),
+        )
+        process_count_thread.start()
+
         # Wait for the target process to complete or timeout
         try:
             target_proc = psutil.Process(self.pid)
@@ -70,8 +94,10 @@ class ComprehensiveMonitor:
         except (psutil.NoSuchProcess, psutil.TimeoutExpired):
             self.logger.info(f"Process {self.pid} either terminated or timed out")
 
-        # Ensure monitoring threads complete
+        # Stop process counting and ensure monitoring threads complete
+        process_count_stop_event.set()
         cpu_ram_thread.join()
+        process_count_thread.join()
         if gpu_thread:
             gpu_thread.join()
 
@@ -94,6 +120,7 @@ class ComprehensiveMonitor:
             "duration": time.time() - start_time,
             "timeout_reached": time.time() - start_time >= timeout,
             "system_info": self.system_info.get_all_info(),
+            "num_processes": self.max_processes,
         }
 
         # Update with CPU/RAM results
@@ -130,6 +157,12 @@ class ComprehensiveMonitor:
 
         result_container.put(result)
 
+    def _monitor_process_count(self, stop_event, interval):
+        """Continuously monitor process count in a separate thread."""
+        while not stop_event.is_set():
+            self._track_process_count()
+            time.sleep(interval)
+
     def _monitor_gpu_process(
         self, pid: int, interval: float, timeout: float, result_container: queue.Queue
     ):
@@ -161,21 +194,21 @@ def _run_serialized_function(serialized_path: str, output_path: str):
     """
 
     code = f"""
-            import dill
-            import sys
-            import traceback
+import dill
+import sys
+import traceback
 
-            try:
-                with open({serialized_path!r}, 'rb') as f:
-                    func, args, kwargs = dill.load(f)
-                result = func(*args, **kwargs)
-                with open({output_path!r}, 'wb') as out_f:
-                    dill.dump({{'result': result, 'error': None}}, out_f)
-            except Exception as e:
-                with open({output_path!r}, 'wb') as out_f:
-                    dill.dump({{'result': None, 'error': traceback.format_exc()}}, out_f)
-                sys.exit(1)
-            """
+try:
+    with open({serialized_path!r}, 'rb') as f:
+        func, args, kwargs = dill.load(f)
+    result = func(*args, **kwargs)
+    with open({output_path!r}, 'wb') as out_f:
+        dill.dump({{'result': result, 'error': None}}, out_f)
+except Exception as e:
+    with open({output_path!r}, 'wb') as out_f:
+        dill.dump({{'result': None, 'error': traceback.format_exc()}}, out_f)
+    sys.exit(1)
+"""
     return code
 
 
