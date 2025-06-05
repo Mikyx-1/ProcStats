@@ -13,6 +13,7 @@ setup(
     package_dir={"": "src"},
     install_requires=[
         "psutil>=5.9.0",
+        "dill>=0.3.0"
     ],
     extras_require={
         "gpu": [
