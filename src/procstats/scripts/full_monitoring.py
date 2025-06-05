@@ -12,10 +12,10 @@ from typing import Any, Callable, Dict, Tuple
 import dill
 import psutil
 
-from cpu_ram_monitoring import (AdaptiveMonitor,
+from .cpu_ram_monitoring import (AdaptiveMonitor,
                                 monitor_cpu_and_ram_by_pid_advanced)
-from gpu_monitoring import GPUMonitor
-from system_info import SystemInfo
+from .gpu_monitoring import GPUMonitor
+from .system_info import SystemInfo
 
 # Configure logging
 logging.basicConfig(
