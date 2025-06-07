@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import psutil
 
-from test_burn_cpu import burn_cpu_accurate
+from ..tests.test_burn_cpu_ram import burn_cpu_accurate
 
 
 def get_cpu_cores():
