@@ -15,6 +15,7 @@ setup(
         "psutil>=5.9.0",
         "dill>=0.3.0"
     ],
+    # REMOVE the entry_points section - it's handled by pyproject.toml
     extras_require={
         "gpu": [
             "pynvml>=11.0.0",  # Optional for NVIDIA GPU monitoring

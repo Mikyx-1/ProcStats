@@ -1,133 +1,213 @@
-# ProcStats
+# 📊 ProcStats
 
-A Python package for monitoring CPU, RAM, and GPU resources with adaptive sampling and noise reduction. ProcStats provides a robust tool to track system resource usage for a given process or function, with a smart stabilisation algorithm to ensure accurate measurements. It automatically detects and includes NVIDIA GPU monitoring if `pynvml` is installed, without requiring a separate package.
+A powerful Python package for **monitoring CPU, RAM, and GPU resources** with adaptive sampling and noise reduction. ProcStats provides robust tools to track system resource usage for any given process or function — with smart stabilization and optional NVIDIA GPU monitoring via `pynvml`.
 
-## Advantages
+---
 
-- **Tracks All Child Processes**: Monitors resource usage across parent and child processes, ensuring comprehensive coverage of multi-process applications.
-- **Smart Stabilisation Algorithm**: Uses adaptive sampling intervals and noise reduction (outlier filtering and moving average smoothing) for reliable and accurate measurements.
-- **Multi-Platform Support**: Compatible with macOS, Windows, Linux, and other Unix-like systems, providing cross-platform system information and resource monitoring.
-- **Timeout Support**: Allows setting a maximum monitoring duration to prevent runaway processes, with graceful termination handling.
-- **Automatic GPU Detection**: Seamlessly includes NVIDIA GPU monitoring (utilisation and VRAM) when `pynvml` is available, without additional package installation.
-- **Non-Intrusive Monitoring**: Leverages multiprocessing to monitor resources without interfering with the target process.
-- **High Data Quality**: Provides detailed statistics (max, average, 95th percentile) and a data quality score to assess measurement reliability.
+## 🚀 Features
 
-## Installation
+* ✅ **Tracks All Child Processes**: Monitors resource usage across parent and child processes — ideal for multi-processing applications.
+* 🧠 **Smart Stabilization**: Adaptive sampling and noise filtering (moving averages + outlier rejection) yield stable, accurate metrics.
+* 💻 **Cross-Platform**: Works on macOS, Windows, Linux, and Unix-like systems.
+* ⏱️ **Timeout Support**: Enforce max runtime limits with graceful shutdowns.
+* 🎮 **Optional NVIDIA GPU Monitoring**: Auto-detects and includes GPU stats if `pynvml` is available.
+* 🧪 **Non-Intrusive Monitoring**: Uses multiprocessing to isolate the monitor from the target workload.
+* 📈 **High Data Quality**: Reports max, average, 95th percentile, and a custom data quality score.
+* 🧪 **Code Coverage**: >90% test coverage with full support for CPU, RAM, and GPU features (see [codecov](https://codecov.io/gh/Mikyx-1/ProcStats))
 
-Install the package with core dependencies (CPU and RAM monitoring):
+---
+
+## 📦 Installation
+
+Install with pip:
 
 ```bash
 pip install procstats
 ```
 
-For NVIDIA GPU monitoring, install the optional dependency:
+To enable **GPU monitoring**, also install:
 
 ```bash
 pip install pynvml
 ```
 
-## Usage
+---
 
-### Monitor a Function
-Use `monitor_function_resources` to track resource usage of a function:
+## 🧰 Usage
+
+### ▶️ Monitor a Python Function
 
 ```python
 from procstats import monitor_function_resources
 from procstats.scripts.cpu_test_lib import burn_cpu_accurate
 
-# Monitor a CPU-intensive function
-result = monitor_function_resources(burn_cpu_accurate, base_interval=0.05, timeout=10.0)
-print("Resource Usage Summary:")
-print(f"CPU Max: {result['cpu_max']:.2f}%")
-print(f"CPU Avg: {result['cpu_avg']:.2f}%")
-print(f"CPU P95: {result['cpu_p95']:.2f}%")
-print(f"RAM Max: {result['ram_max']:.2f} MB")
-print(f"RAM Avg: {result['ram_avg']:.2f} MB")
-print(f"RAM P95: {result['ram_p95']:.2f} MB")
-if result['gpu_max_util']:
-    for gpu_id in result['gpu_max_util']:
-        print(f"GPU {gpu_id} Max Utilisation: {result['gpu_max_util'][gpu_id]:.2f}%")
-        print(f"GPU {gpu_id} VRAM Max: {result['vram_max_mb'][gpu_id]:.2f} MB")
+result = monitor_function_resources(
+    burn_cpu_accurate,
+    kwargs={"cpu_percent": 150, "duration": 5},
+    base_interval=0.05,
+    timeout=10.0
+)
+print(result)
 ```
 
-### Monitor a Process
-Use `ComprehensiveMonitor` to monitor an existing process by PID:
+### 💻 CLI Support
 
 ```python
-from procstats.scripts.full_monitoring import ComprehensiveMonitor
+import argparse
+import os
 import multiprocessing as mp
+import torch
 
-# Example: Monitor a process
-def target_function():
-    # Your function here
-    pass
+from procstats.scripts.cpu_test_lib import burn_cpu_accurate
+
+def gpu_workload(gpu_id: int = 1):
+    print(f"[Child] PID: {os.getpid()} using GPU {gpu_id}")
+    try:
+        device = f"cuda:{gpu_id}"
+        a = torch.randn(5000, 5000, device=device)
+        for _ in range(2000):
+            b = torch.matmul(a, a.T)
+    except RuntimeError as e:
+        print(f"[Child] GPU task on cuda:{gpu_id} failed: {e}")
+
+
+def heavy_gpu_task():
+    print(f"[Parent] PID: {os.getpid()}")
+
+    # Pick GPU 1 for parent, GPU 0 for child (customize as needed)
+    parent_gpu = 1
+    child_gpu = 1
+
+    # Start child process
+    p = mp.Process(target=gpu_workload, args=(child_gpu,))
+    p.start()
+
+    # Run the same logic in the parent process
+    gpu_workload(parent_gpu)
+
+    p.join()
+
+    return 10
+
 
 if __name__ == "__main__":
-    process = mp.Process(target=target_function)
-    process.start()
-    
-    monitor = ComprehensiveMonitor(process.pid, base_interval=0.05)
-    result_container = mp.Manager().list()
-    monitor_proc = mp.Process(
-        target=monitor.monitor_resources,
-        args=(result_container, 10.0)
-    )
-    monitor_proc.start()
-    
-    process.join()
-    monitor_proc.join()
-    
-    result = result_container[0]
-    print("Process Resource Usage:", result)
+    parser = argparse.ArgumentParser(description="Run CPU burn workload with optional GPU usage")
+    parser.add_argument("--cpu_percent", type=int, default=350, required=True, help="Total CPU percent to consume (e.g., 350)")
+    parser.add_argument("--duration", type=int, default=10, required=True, help="Duration of the workload in seconds")
+
+    args = parser.parse_args()
+
+    burn_cpu_accurate(cpu_percent=args.cpu_percent, duration=args.duration)
 ```
 
-## Requirements
-
-- **Python**: >= 3.8
-- **Required Dependencies**:
-  - `psutil>=5.9.0` (for CPU and RAM monitoring)
-- **Optional Dependencies**:
-  - `pynvml>=11.0.0` (for NVIDIA GPU monitoring; install separately if needed)
-  - `torch>=2.0.0` (for GPU-related testing, e.g., `heavy_gpu_task`; install separately if needed)
-- **Testing** (optional):
-  - `pytest>=7.0.0` (install with `pip install pytest`)
-
-## Project Structure
-
-```
-ProcStats/
-├── LICENSE
-├── MANIFEST.in
-├── pyproject.toml
-├── README.md
-├── setup.py
-└── src/
-    └── procstats/
-        ├── __init__.py
-        ├── scripts/
-        │   ├── cpu_monitor_setup.py
-        │   ├── cpu_ram_monitoring.py
-        │   ├── cpu_test_lib.py
-        │   ├── full_monitoring.py
-        │   ├── gpu_monitor_setup.py
-        │   ├── gpu_monitoring.py
-        │   ├── gpu_test_lib.py
-        │   └── system_info.py
-        └── tests/
-            ├── test_burn_cpu_ram.py
-            └── test_lib.py
+```bash
+# Syntax to monitor test_lib.py with procstats
+procstats test_lib.py --cpu_percent 350 --duration 5
 ```
 
-## Contributing
+Example output:
 
-Contributions are welcome! Please open an issue or submit a pull request on [GitHub](https://github.com/Mikyx-1/ProcStats).
+```bash
+(virenv1) (base) lehoangviet@lehoangviet-MS-7D99:~/Desktop/python_projects/ProcStats-CPP$ procstats test_lib.py --cpu_percent 350 --duration 5
+2025-06-07 22:29:18,175 - INFO - Monitoring script: test_lib.py
+2025-06-07 22:29:18,175 - INFO - Script arguments: --cpu_percent 350 --duration 5
+2025-06-07 22:29:18,175 - INFO - Procstats config - Interval: 0.05s, Timeout: 12.0s
+2025-06-07 22:29:18,177 - INFO - Started subprocess with PID: 25511
+2025-06-07 22:29:18,285 - INFO - NVIDIA ML initialized successfully
+2025-06-07 22:29:18,286 - INFO - NVIDIA ML initialized successfully
+2025-06-07 22:29:18,286 - INFO - Starting GPU monitoring for PID 25511 (include_children=True) on 2 GPU(s) with interval 0.05s and timeout 12.0s
+[Monitor] Parent process 25511 terminated
+2025-06-07 22:29:24,450 - INFO - No processes to monitor (original PID: 25511)
+2025-06-07 22:29:24,452 - INFO - Monitoring completed. Tracked 5 PIDs: [25511, 25539, 25540, 25541, 25542]
+2025-06-07 22:29:25,430 - ERROR - Failed to load function output: No module named 'test_burn_cpu'
+============================================================
+PROCSTATS MONITORING RESULTS
+============================================================
 
-## Licence
+📊 EXECUTION SUMMARY
+Duration: 6.18 seconds
+Timeout reached: No
+Measurements taken: 35
+Data quality score: 50.00
 
-This project is licenced under the MIT Licence. See the [LICENCE](LICENCE) file for details.
+🔄 PROCESS INFORMATION
+Max processes: 5
+Tracked PIDs: 5
 
-## Contact
+🖥️  CPU USAGE
+Max CPU: 372.4%
+Average CPU: 227.2%
+95th percentile CPU: 372.4%
+CPU cores: 12
 
-- **Author**: Le Hoang Viet
-- **Email**: lehoangviet2k@gmail.com
-- **GitHub**: [Mikyx-1/ProcStats](https://github.com/Mikyx-1/ProcStats)
+💾 MEMORY USAGE
+Max RAM: 1277.9 MB
+Average RAM: 812.2 MB
+95th percentile RAM: 1277.9 MB
+
+🎮 GPU USAGE
+GPU 0 - Max utilization: 0.0%
+GPU 0 - Mean utilization: 0.0%
+GPU 0 - Max VRAM: 0.0 MB
+GPU 0 - Mean VRAM: 0.0 MB
+GPU 1 - Max utilization: 0.0%
+GPU 1 - Mean utilization: 0.0%
+GPU 1 - Max VRAM: 0.0 MB
+GPU 1 - Mean VRAM: 0.0 MB
+
+📤 STDOUT
+[Subprocess] Running with PID: 25511
+pid: 25511
+System: 12 CPU cores (theoretical max 1200%)
+Target: 350% CPU for 5s
+Strategy: 4 processes
+  Process 0: 100%
+  Process 1: 100%
+  Process 2: 100%
+  Process 3: 50%
+Process 0: Starting 100% CPU burn for 5s
+Process 1: Starting 100% CPU burn for 5s
+Process 2: Starting 100% CPU burn for 5s
+Process 3: Starting 50% CPU burn for 5s
+
+============================================================
+(virenv1) (base) lehoangviet@lehoangviet-MS-7D99:~/Desktop/python_projects/ProcStats-CPP$ 
+...
+============================================================
+```
+
+---
+
+## 📋 Requirements
+
+* **Python**: >= 3.8
+* **Required**:
+
+  * `psutil>=5.9.0`
+* **Optional**:
+
+  * `pynvml>=11.0.0` (for GPU support)
+  * `torch>=2.0.0` (for demo workloads)
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Open an issue or submit a pull request:
+👉 [github.com/Mikyx-1/ProcStats](https://github.com/Mikyx-1/ProcStats)
+
+---
+
+## 📜 License
+
+Licensed under the **MIT License**. See the [LICENSE](LICENSE) file.
+
+---
+
+## 👤 Author
+
+* **Name**: Le Hoang Viet
+* **Email**: [lehoangviet2k@gmail.com](mailto:lehoangviet2k@gmail.com)
+* **GitHub**: [Mikyx-1](https://github.com/Mikyx-1/ProcStats)
+
+---
