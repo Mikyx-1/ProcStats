@@ -13,7 +13,7 @@ import dill
 import psutil
 
 from .cpu_ram_monitoring import (AdaptiveMonitor,
-                                monitor_cpu_and_ram_by_pid_advanced)
+                                 monitor_cpu_and_ram_by_pid_advanced)
 from .gpu_monitoring import GPUMonitor
 from .system_info import SystemInfo
 
@@ -32,13 +32,24 @@ class ComprehensiveMonitor:
         self.gpu_monitor = GPUMonitor()
         self.system_info = SystemInfo()
         self.max_processes = 0
+        self.tracked_pids = set()
+
+    def _get_all_process_pids(self):
+        """Get all PIDs in the process tree."""
+        try:
+            parent = psutil.Process(self.pid)
+            children = parent.children(recursive=True)
+            all_pids = [self.pid] + [child.pid for child in children]
+            self.tracked_pids.update(all_pids)
+            return all_pids
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return []
 
     def _track_process_count(self):
         """Track the maximum number of processes in the process tree."""
         try:
-            parent = psutil.Process(self.pid)
-            children = parent.children(recursive=True)
-            current_count = len(children) + 1  # +1 for parent process
+            all_pids = self._get_all_process_pids()
+            current_count = len(all_pids)
 
             # Update max processes if current count is higher
             if current_count > self.max_processes:
@@ -121,6 +132,7 @@ class ComprehensiveMonitor:
             "timeout_reached": time.time() - start_time >= timeout,
             "system_info": self.system_info.get_all_info(),
             "num_processes": self.max_processes,
+            "tracked_pids": list(self.tracked_pids),
         }
 
         # Update with CPU/RAM results
@@ -169,6 +181,7 @@ class ComprehensiveMonitor:
         """Run GPU monitoring in a separate thread to ensure proper NVIDIA ML initialization."""
         try:
             gpu_monitor = GPUMonitor()  # Reinitialize in new thread
+            # Monitor all PIDs in the process tree, not just the parent
             result = gpu_monitor.monitor_gpu_utilisation_by_pid(pid, interval, timeout)
             result_container.put(result)
         except Exception as e:
@@ -197,6 +210,10 @@ def _run_serialized_function(serialized_path: str, output_path: str):
 import dill
 import sys
 import traceback
+import os
+
+# Print current PID for debugging
+print(f"[Subprocess] Running with PID: {{os.getpid()}}", flush=True)
 
 try:
     with open({serialized_path!r}, 'rb') as f:
@@ -275,11 +292,18 @@ def monitor_function_resources(
         python_code = _run_serialized_function(serialized_path, output_path)
 
         # Launch subprocess running python -c 'python_code'
+        # Use exec to replace the shell process with Python process
         process = subprocess.Popen(
             [sys.executable, "-c", python_code],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            preexec_fn=os.setsid if hasattr(os, 'setsid') else None,  # Create new process group
         )
+
+        logger.info(f"Started subprocess with PID: {process.pid}")
+
+        # Wait a small amount of time for the subprocess to start
+        time.sleep(0.1)
 
         # Start monitoring the subprocess pid
         monitor = ComprehensiveMonitor(process.pid, base_interval)
