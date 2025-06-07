@@ -15,6 +15,11 @@ setup(
         "psutil>=5.9.0",
         "dill>=0.3.0"
     ],
+    entry_points={
+        'console_scripts': [
+            'procstats=procstats.cli:main',
+        ],
+    },
     extras_require={
         "gpu": [
             "pynvml>=11.0.0",  # Optional for NVIDIA GPU monitoring
