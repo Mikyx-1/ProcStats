@@ -14,7 +14,7 @@ except ImportError:
         # based on where your main monitoring function is located
         pass
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Le Hoang Viet"
 __email__ = "lehoangviet2k@gmail.com"
 

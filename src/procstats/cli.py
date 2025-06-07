@@ -383,7 +383,7 @@ def main():
     parser.add_argument(
         '--version',
         action='version',
-        version='procstats 0.1.0'
+        version='procstats 0.2.0'
     )
     
     # Handle help specially
