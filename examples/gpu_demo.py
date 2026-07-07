@@ -1,6 +1,7 @@
-import combined_procstats
+# Manual reference script, not runnable as-is: `combined_procstats` and
+# `test_burn_cpu` are placeholders for whichever GPU-monitoring entry point
+# and burn helper you wire up. Not collected by pytest.
 import time
-from test_burn_cpu import burn_cpu_accurate
 
 def example_function():
     # Simulate some CPU and GPU work

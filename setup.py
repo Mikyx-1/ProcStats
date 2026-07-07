@@ -13,7 +13,8 @@ setup(
     package_dir={"": "src"},
     install_requires=[
         "psutil>=5.9.0",
-        "dill>=0.3.0"
+        "dill>=0.3.0",
+        "numpy>=1.21.0"
     ],
     # REMOVE the entry_points section - it's handled by pyproject.toml
     extras_require={
