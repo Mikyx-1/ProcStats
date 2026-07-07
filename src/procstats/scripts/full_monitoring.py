@@ -24,10 +24,11 @@ logging.basicConfig(
 
 
 class ComprehensiveMonitor:
-    def __init__(self, pid: int, base_interval: float = 0.05):
+    def __init__(self, pid: int, base_interval: float = 0.05, warmup_time: float = 1.0):
         self.logger = logging.getLogger(__name__)
         self.pid = pid
         self.base_interval = base_interval
+        self.warmup_time = warmup_time
         self.cpu_monitor = AdaptiveMonitor(pid, base_interval)
         self.gpu_monitor = GPUMonitor()
         self.system_info = SystemInfo()
@@ -77,7 +78,7 @@ class ComprehensiveMonitor:
         cpu_ram_queue_wrapper = QueueWrapper(cpu_ram_result_container)
         cpu_ram_thread = threading.Thread(
             target=monitor_cpu_and_ram_by_pid_advanced,
-            args=(self.pid, self.base_interval, cpu_ram_queue_wrapper),
+            args=(self.pid, self.base_interval, cpu_ram_queue_wrapper, self.warmup_time),
         )
         cpu_ram_thread.start()
 
@@ -122,6 +123,8 @@ class ComprehensiveMonitor:
             "ram_p95": 0,
             "num_cores": psutil.cpu_count(),
             "measurements_taken": 0,
+            "warmup_time": self.warmup_time,
+            "warmup_excluded_samples": 0,
             "data_quality_score": 0,
             "gpu_max_util": {},
             "gpu_mean_util": {},
@@ -148,6 +151,8 @@ class ComprehensiveMonitor:
                     "ram_p95": cpu_ram_data["ram_p95"],
                     "num_cores": cpu_ram_data["num_cores"],
                     "measurements_taken": cpu_ram_data["measurements_taken"],
+                    "warmup_time": cpu_ram_data["warmup_time"],
+                    "warmup_excluded_samples": cpu_ram_data["warmup_excluded_samples"],
                     "data_quality_score": cpu_ram_data["data_quality_score"],
                 }
             )
@@ -273,7 +278,19 @@ def monitor_function_resources(
     kwargs: Dict[str, Any] = None,
     base_interval: float = 0.05,
     timeout: float = 12.0,
+    warmup_time: float = 1.0,
 ) -> Dict[str, Any]:
+    """
+    Args:
+        warmup_time: seconds to distrust a process's CPU reading after that
+            process starts, since native-thread-pool spin-up in imported
+            libraries (numpy/OpenBLAS, torch, tensorflow, ...) can genuinely
+            burn many CPU-seconds within a fraction of a second and get
+            mistaken for the workload's own usage. See
+            monitor_cpu_and_ram_by_pid_advanced for the full explanation.
+            Raise it if `target` does heavy native-library imports; lower
+            it (down to 0) for lightweight pure-Python workloads.
+    """
     if kwargs is None:
         kwargs = {}
 
@@ -306,7 +323,7 @@ def monitor_function_resources(
         time.sleep(0.1)
 
         # Start monitoring the subprocess pid
-        monitor = ComprehensiveMonitor(process.pid, base_interval)
+        monitor = ComprehensiveMonitor(process.pid, base_interval, warmup_time)
         monitor_thread = threading.Thread(
             target=monitor.monitor_resources, args=(result_container, timeout)
         )
