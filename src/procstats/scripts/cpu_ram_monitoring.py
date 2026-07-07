@@ -94,22 +94,7 @@ def monitor_cpu_and_ram_by_pid_advanced(
     try:
         parent_proc = psutil.Process(pid)
 
-        # Initial CPU percent call to prime the system
-        try:
-            parent_proc.cpu_percent()
-            for child in parent_proc.children(recursive=True):
-                try:
-                    child.cpu_percent()
-                except (
-                    psutil.NoSuchProcess,
-                    psutil.ZombieProcess,
-                    psutil.AccessDenied,
-                ):
-                    continue
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-            pass
-
-        # Brief stabilization period
+        # Brief stabilization period, giving child processes time to spawn
         time.sleep(0.1)
 
         measurement_count = 0
@@ -132,13 +117,35 @@ def monitor_cpu_and_ram_by_pid_advanced(
                 )
                 current_interval = monitor.adaptive_interval(recent_window)
 
-                # Collect measurements
-                all_procs = [parent_proc] + parent_proc.children(recursive=True)
+                # Snapshot cumulative CPU time for the whole tree, sleep ONCE for
+                # current_interval, then snapshot again. This measures every
+                # process over the same shared window, instead of calling
+                # proc.cpu_percent(interval=X) per process, which sleeps for X
+                # seconds *per process* and stretches one "sample" out to
+                # N x current_interval for an N-process tree.
+                before_procs = [parent_proc] + parent_proc.children(recursive=True)
+                cpu_times_before = {}
+                for proc in before_procs:
+                    try:
+                        times = proc.cpu_times()
+                        cpu_times_before[proc.pid] = times.user + times.system
+                    except (
+                        psutil.NoSuchProcess,
+                        psutil.ZombieProcess,
+                        psutil.AccessDenied,
+                    ):
+                        continue
+
+                sleep_start = time.time()
+                time.sleep(current_interval)
+                elapsed = time.time() - sleep_start
+
+                after_procs = [parent_proc] + parent_proc.children(recursive=True)
                 total_cpu_percent = 0.0
                 total_ram_usage = 0.0
                 active_processes = 0
 
-                for proc in all_procs:
+                for proc in after_procs:
                     try:
                         if (
                             not proc.is_running()
@@ -146,11 +153,24 @@ def monitor_cpu_and_ram_by_pid_advanced(
                         ):
                             continue
 
-                        # Use the adaptive interval for CPU measurement
-                        cpu_percent = proc.cpu_percent(interval=current_interval)
+                        times = proc.cpu_times()
+                        cpu_time_after = times.user + times.system
                         ram_usage = proc.memory_info().rss / 1024**2  # MB
 
-                        total_cpu_percent += cpu_percent
+                        cpu_time_before = cpu_times_before.get(proc.pid)
+                        if cpu_time_before is None:
+                            # Process appeared mid-window; its whole lifetime
+                            # fits within `elapsed`, so use its total CPU time
+                            # as a lower-bound estimate over that window.
+                            cpu_delta = cpu_time_after
+                        else:
+                            cpu_delta = cpu_time_after - cpu_time_before
+
+                        cpu_percent = (
+                            100.0 * cpu_delta / elapsed if elapsed > 0 else 0.0
+                        )
+
+                        total_cpu_percent += max(0.0, cpu_percent)
                         total_ram_usage += ram_usage
                         active_processes += 1
 
@@ -173,9 +193,6 @@ def monitor_cpu_and_ram_by_pid_advanced(
                             consecutive_stable_readings += 1
                         else:
                             consecutive_stable_readings = 0
-
-                # Small sleep to prevent overwhelming the system
-                time.sleep(max(0.005, current_interval * 0.1))
 
             except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
                 print(f"[Monitor] Process {pid} no longer accessible")
