@@ -24,7 +24,8 @@ requires-python = ">=3.8"
 
 dependencies = [
     "psutil>=5.9.0",
-    "dill>=0.3.0"
+    "dill>=0.3.0",
+    "numpy>=1.21.0"
 ]
 
 [project.optional-dependencies]
@@ -44,3 +45,10 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["src/procstats/tests"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: burns real CPU across processes to check measurement accuracy; run explicitly with `pytest -m slow`",
+]

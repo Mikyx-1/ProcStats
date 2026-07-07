@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import psutil
 
+from .cpu_rate_estimator import RobustCpuRateEstimator
 from ..tests.test_burn_cpu_ram import burn_cpu_accurate
 
 
@@ -94,26 +95,13 @@ def monitor_cpu_and_ram_by_pid_advanced(
     try:
         parent_proc = psutil.Process(pid)
 
-        # Initial CPU percent call to prime the system
-        try:
-            parent_proc.cpu_percent()
-            for child in parent_proc.children(recursive=True):
-                try:
-                    child.cpu_percent()
-                except (
-                    psutil.NoSuchProcess,
-                    psutil.ZombieProcess,
-                    psutil.AccessDenied,
-                ):
-                    continue
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-            pass
-
-        # Brief stabilization period
+        # Brief stabilization period, giving child processes time to spawn
         time.sleep(0.1)
 
         measurement_count = 0
         consecutive_stable_readings = 0
+        num_cores = get_cpu_cores()
+        cpu_estimators: Dict[int, RobustCpuRateEstimator] = {}
 
         while time.time() - start_time < timeout:
             try:
@@ -132,13 +120,23 @@ def monitor_cpu_and_ram_by_pid_advanced(
                 )
                 current_interval = monitor.adaptive_interval(recent_window)
 
-                # Collect measurements
-                all_procs = [parent_proc] + parent_proc.children(recursive=True)
+                # Sleep once for current_interval, then read cumulative CPU
+                # time for the whole tree. Each process's own
+                # RobustCpuRateEstimator remembers its previous reading and
+                # derives the delta/elapsed itself (clamped to what's
+                # physically possible and corroborated against a longer
+                # sliding window), so no separate before-snapshot pass is
+                # needed and single-sample OS accounting artifacts can't
+                # leak into the reported rate.
+                time.sleep(current_interval)
+                now = time.time()
+
+                procs = [parent_proc] + parent_proc.children(recursive=True)
                 total_cpu_percent = 0.0
                 total_ram_usage = 0.0
                 active_processes = 0
 
-                for proc in all_procs:
+                for proc in procs:
                     try:
                         if (
                             not proc.is_running()
@@ -146,11 +144,35 @@ def monitor_cpu_and_ram_by_pid_advanced(
                         ):
                             continue
 
-                        # Use the adaptive interval for CPU measurement
-                        cpu_percent = proc.cpu_percent(interval=current_interval)
+                        times = proc.cpu_times()
+                        cpu_time = times.user + times.system
                         ram_usage = proc.memory_info().rss / 1024**2  # MB
 
-                        total_cpu_percent += cpu_percent
+                        estimator = cpu_estimators.get(proc.pid)
+                        if estimator is None:
+                            estimator = RobustCpuRateEstimator(num_cores=num_cores)
+                            cpu_estimators[proc.pid] = estimator
+
+                        sample = estimator.update(now, cpu_time)
+                        if sample is None:
+                            # First sample for this pid: no prior reading to
+                            # diff against yet. cpu_time is this process's
+                            # *entire lifetime* CPU usage, so it must be
+                            # divided by its actual age (now - create_time),
+                            # not this iteration's interval -- dividing a
+                            # lifetime total by a tiny window is exactly the
+                            # bug we're fixing.
+                            try:
+                                proc_age = max(now - proc.create_time(), 1e-6)
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                proc_age = current_interval
+                            cpu_percent = min(
+                                100.0 * cpu_time / proc_age, 100.0 * num_cores
+                            )
+                        else:
+                            cpu_percent = sample["trusted_rate"]
+
+                        total_cpu_percent += max(0.0, cpu_percent)
                         total_ram_usage += ram_usage
                         active_processes += 1
 
@@ -160,6 +182,12 @@ def monitor_cpu_and_ram_by_pid_advanced(
                         psutil.AccessDenied,
                     ):
                         continue
+
+                # Hard system-wide backstop: the whole tree can never
+                # legitimately exceed num_cores x 100%, even if every
+                # individual process's own reading is (independently)
+                # within its own per-process ceiling.
+                total_cpu_percent = min(total_cpu_percent, num_cores * 100.0)
 
                 if active_processes > 0:  # Only record if we have valid data
                     raw_cpu_data.append(total_cpu_percent)
@@ -173,9 +201,6 @@ def monitor_cpu_and_ram_by_pid_advanced(
                             consecutive_stable_readings += 1
                         else:
                             consecutive_stable_readings = 0
-
-                # Small sleep to prevent overwhelming the system
-                time.sleep(max(0.005, current_interval * 0.1))
 
             except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
                 print(f"[Monitor] Process {pid} no longer accessible")
@@ -208,17 +233,11 @@ def monitor_cpu_and_ram_by_pid_advanced(
             final_cpu_data = moving_average(filtered_cpu, window=3)
             final_ram_data = moving_average(filtered_ram, window=3)
 
-            # Calculate statistics from both raw and processed data
-            cpu_max_raw = max(raw_cpu_data)
-            cpu_max_processed = max(final_cpu_data)
-
-            # Use processed data for averages, but keep raw max if significantly higher
-            # (to not miss genuine spikes)
-            cpu_max_final = (
-                cpu_max_raw
-                if cpu_max_raw > cpu_max_processed * 1.2
-                else cpu_max_processed
-            )
+            # raw_cpu_data is already spike-filtered per process by
+            # RobustCpuRateEstimator (physical clamp + two-timescale
+            # corroboration), so the true max no longer needs a
+            # raw-vs-smoothed override to avoid losing genuine spikes.
+            cpu_max_final = max(raw_cpu_data)
 
             result_data = {
                 "cpu_max": cpu_max_final,
