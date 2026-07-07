@@ -27,9 +27,14 @@ BURN_DURATION_S = 4
 # stayed within 7% of target, so +/-20% has real margin without being loose
 # enough to miss a genuine regression.
 AVG_TOLERANCE = 0.2
-# cpu_max skips outlier_filter by design and is currently known-broken (see
-# test_cpu_max_matches_burned_target below), so its tolerance is irrelevant
-# to whether that test passes -- kept wide just to document intent.
+# cpu_max skips outlier_filter by design, so it depends entirely on
+# warmup_time excluding the process-startup contamination (numpy/OpenBLAS
+# thread-pool spin-up mistaken for the workload's own usage -- see
+# monitor_cpu_and_ram_by_pid_advanced's warmup_time docstring). With the
+# default warmup_time, 6 manual runs across 50/100/200/400% targets stayed
+# within 41% of target (worst case was the 50% run, where a small absolute
+# jitter is a large relative one) -- +/-40% has some margin without being
+# loose enough to miss a real regression back to the old 300-4700% spikes.
 MAX_TOLERANCE = 0.4
 
 
@@ -51,16 +56,35 @@ def test_cpu_avg_matches_burned_target():
 
 
 def test_cpu_max_matches_burned_target():
-    # Known to currently fail: a process-startup OS-accounting artifact
-    # (cpu_times() jumping by ~1-2s of CPU time in a ~50ms sample window)
-    # slips past both RobustCpuRateEstimator safeguards during ramp-up --
-    # the physical clamp uses the system-wide core count as a per-process
-    # ceiling, and there isn't yet enough coarse-window history to refute
-    # the spike via corroboration. Left failing intentionally to track the
-    # bug rather than hiding it.
+    # Relies on the default warmup_time to exclude each process's own
+    # startup window, during which a native library's thread-pool spin-up
+    # (numpy/OpenBLAS here) can genuinely burn many CPU-seconds in a
+    # fraction of a second -- real CPU time, not a measurement artifact,
+    # so RobustCpuRateEstimator's safeguards alone can't catch it. See
+    # test_cpu_max_without_warmup_reproduces_the_spike below for proof
+    # this test would fail without warmup_time.
     result = _burn_and_monitor()
     low, high = TARGET_PERCENT * (1 - MAX_TOLERANCE), TARGET_PERCENT * (1 + MAX_TOLERANCE)
     assert low <= result["cpu_max"] <= high, (
         f"cpu_max={result['cpu_max']:.1f}% not within "
         f"[{low:.0f}, {high:.0f}] of a {TARGET_PERCENT}% burn"
+    )
+
+
+def test_cpu_max_without_warmup_reproduces_the_spike():
+    # Regression lock: proves warmup_time is actually what fixes cpu_max
+    # above, not an incidental side effect of something else. Disabling it
+    # should reproduce the original bug -- cpu_max wildly overshooting a
+    # 200% burn because process-startup thread-pool noise gets counted as
+    # the workload's own usage.
+    result = monitor_cpu_and_ram_on_function_advanced(
+        target=burn_cpu_accurate,
+        args=(TARGET_PERCENT, BURN_DURATION_S),
+        base_interval=0.05,
+        warmup_time=0,
+    )
+    assert result["warmup_excluded_samples"] == 0
+    assert result["cpu_max"] > TARGET_PERCENT * 2, (
+        f"cpu_max={result['cpu_max']:.1f}% -- expected the known startup-spike "
+        f"artifact to reproduce with warmup_time=0"
     )

@@ -79,9 +79,37 @@ class AdaptiveMonitor:
 
 
 def monitor_cpu_and_ram_by_pid_advanced(
-    pid: int, base_interval: float, result_container: list
+    pid: int, base_interval: float, result_container: list, warmup_time: float = 1.0
 ):
-    """Advanced monitoring with adaptive sampling and noise reduction."""
+    """
+    Advanced monitoring with adaptive sampling and noise reduction.
+
+    Args:
+        warmup_time: seconds to distrust a process's CPU reading after
+            *that process* starts (each process in the monitored tree gets
+            its own warmup window, measured from its own create_time -- a
+            child spawned mid-run gets the same grace period a process
+            running since the start got).
+
+            Native libraries that spin up their own thread pool on import
+            or first use -- numpy/OpenBLAS, PyTorch, TensorFlow, OpenCV,
+            MKL -- do so with real OS threads outside Python's own
+            threading module, so a process can genuinely burn many
+            CPU-seconds within a tiny wall-clock window right after it
+            starts, even though the workload you're trying to measure
+            hasn't done anything yet. That's real CPU time, not a
+            measurement artifact, so it can't be filtered out
+            statistically -- it has to be excluded by knowing the process
+            is still too young to trust.
+
+            The default (1.0s) comfortably covers what was observed
+            empirically for a numpy import (spikes appeared 0.6-0.75s
+            into a process's life, settling within another 1-2 samples).
+            Increase it for workloads with heavier native-thread-pool
+            imports (torch, tensorflow); decrease it for lightweight,
+            pure-Python workloads to start trusting readings sooner. Set
+            to 0 to disable and trust every sample immediately.
+    """
     monitor = AdaptiveMonitor(pid, base_interval)
     cpu_measurements = []
     ram_measurements = []
@@ -91,6 +119,7 @@ def monitor_cpu_and_ram_by_pid_advanced(
     # Separate tracking for raw vs processed data
     raw_cpu_data = []
     raw_ram_data = []
+    warmup_excluded_samples = 0
 
     try:
         parent_proc = psutil.Process(pid)
@@ -135,6 +164,7 @@ def monitor_cpu_and_ram_by_pid_advanced(
                 total_cpu_percent = 0.0
                 total_ram_usage = 0.0
                 active_processes = 0
+                cpu_active_processes = 0
 
                 for proc in procs:
                     try:
@@ -147,6 +177,11 @@ def monitor_cpu_and_ram_by_pid_advanced(
                         times = proc.cpu_times()
                         cpu_time = times.user + times.system
                         ram_usage = proc.memory_info().rss / 1024**2  # MB
+
+                        try:
+                            proc_age = now - proc.create_time()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            proc_age = current_interval
 
                         estimator = cpu_estimators.get(proc.pid)
                         if estimator is None:
@@ -162,19 +197,31 @@ def monitor_cpu_and_ram_by_pid_advanced(
                             # not this iteration's interval -- dividing a
                             # lifetime total by a tiny window is exactly the
                             # bug we're fixing.
-                            try:
-                                proc_age = max(now - proc.create_time(), 1e-6)
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                proc_age = current_interval
                             cpu_percent = min(
-                                100.0 * cpu_time / proc_age, 100.0 * num_cores
+                                100.0 * cpu_time / max(proc_age, 1e-6),
+                                100.0 * num_cores,
                             )
                         else:
                             cpu_percent = sample["trusted_rate"]
 
-                        total_cpu_percent += max(0.0, cpu_percent)
                         total_ram_usage += ram_usage
                         active_processes += 1
+
+                        if proc_age < warmup_time:
+                            # Still inside this process's own warmup window.
+                            # A native library (numpy/OpenBLAS, torch, ...)
+                            # spinning up its thread pool on import/first use
+                            # can genuinely burn many CPU-seconds within a
+                            # fraction of a second here -- that's real CPU
+                            # time, not a measurement artifact, so no amount
+                            # of statistical filtering can catch it. Exclude
+                            # it instead of letting it masquerade as the
+                            # monitored workload's own usage.
+                            warmup_excluded_samples += 1
+                            continue
+
+                        total_cpu_percent += max(0.0, cpu_percent)
+                        cpu_active_processes += 1
 
                     except (
                         psutil.NoSuchProcess,
@@ -190,8 +237,10 @@ def monitor_cpu_and_ram_by_pid_advanced(
                 total_cpu_percent = min(total_cpu_percent, num_cores * 100.0)
 
                 if active_processes > 0:  # Only record if we have valid data
-                    raw_cpu_data.append(total_cpu_percent)
                     raw_ram_data.append(total_ram_usage)
+
+                if cpu_active_processes > 0:  # At least one process past warmup
+                    raw_cpu_data.append(total_cpu_percent)
                     measurement_count += 1
 
                     # Check for stability (for potential early termination of very stable loads)
@@ -233,10 +282,11 @@ def monitor_cpu_and_ram_by_pid_advanced(
             final_cpu_data = moving_average(filtered_cpu, window=3)
             final_ram_data = moving_average(filtered_ram, window=3)
 
-            # raw_cpu_data is already spike-filtered per process by
-            # RobustCpuRateEstimator (physical clamp + two-timescale
-            # corroboration), so the true max no longer needs a
-            # raw-vs-smoothed override to avoid losing genuine spikes.
+            # raw_cpu_data has already had each process's own warmup window
+            # excluded (see warmup_time above) and is spike-filtered per
+            # process by RobustCpuRateEstimator (physical clamp +
+            # two-timescale corroboration), so the true max no longer needs
+            # a raw-vs-smoothed override to avoid losing genuine spikes.
             cpu_max_final = max(raw_cpu_data)
 
             result_data = {
@@ -256,6 +306,8 @@ def monitor_cpu_and_ram_by_pid_advanced(
                 ),
                 "num_cores": get_cpu_cores(),
                 "measurements_taken": measurement_count,
+                "warmup_time": warmup_time,
+                "warmup_excluded_samples": warmup_excluded_samples,
                 "data_quality_score": 100
                 - min(
                     50, monitor.calculate_stability_score(final_cpu_data)
@@ -271,6 +323,8 @@ def monitor_cpu_and_ram_by_pid_advanced(
                 "ram_p95": 0,
                 "num_cores": get_cpu_cores(),
                 "measurements_taken": 0,
+                "warmup_time": warmup_time,
+                "warmup_excluded_samples": warmup_excluded_samples,
                 "data_quality_score": 0,
             }
 
@@ -285,6 +339,8 @@ def monitor_cpu_and_ram_by_pid_advanced(
             "ram_p95": 0,
             "num_cores": get_cpu_cores(),
             "measurements_taken": 0,
+            "warmup_time": warmup_time,
+            "warmup_excluded_samples": warmup_excluded_samples,
             "data_quality_score": 0,
         }
 
@@ -297,6 +353,7 @@ def monitor_cpu_and_ram_on_function_advanced(
     args: Tuple = (),
     kwargs: Dict[str, Any] = None,
     base_interval: float = 0.05,
+    warmup_time: float = 1.0,
 ) -> Dict[str, float]:
     """
     Enhanced monitoring function with adaptive sampling and noise reduction.
@@ -306,6 +363,14 @@ def monitor_cpu_and_ram_on_function_advanced(
         args: Positional arguments for the target function.
         kwargs: Keyword arguments for the target function.
         base_interval: Base sampling interval (will be adapted during monitoring).
+        warmup_time: seconds to distrust a process's CPU reading after that
+            process starts, since native-thread-pool spin-up in imported
+            libraries (numpy/OpenBLAS, torch, tensorflow, ...) can genuinely
+            burn many CPU-seconds within a fraction of a second and get
+            mistaken for the workload's own usage. See
+            monitor_cpu_and_ram_by_pid_advanced for the full explanation.
+            Raise it if your target does heavy native-library imports;
+            lower it (down to 0) for lightweight pure-Python workloads.
 
     Returns:
         Dictionary with comprehensive resource usage statistics.
@@ -324,7 +389,7 @@ def monitor_cpu_and_ram_on_function_advanced(
     # Launch advanced monitor process
     monitor_proc = mp.Process(
         target=monitor_cpu_and_ram_by_pid_advanced,
-        args=(process.pid, base_interval, result_container),
+        args=(process.pid, base_interval, result_container, warmup_time),
     )
     monitor_proc.start()
 
@@ -344,6 +409,8 @@ def monitor_cpu_and_ram_on_function_advanced(
             "ram_p95": 0,
             "num_cores": 1,
             "measurements_taken": 0,
+            "warmup_time": warmup_time,
+            "warmup_excluded_samples": 0,
             "data_quality_score": 0,
         }
     )
